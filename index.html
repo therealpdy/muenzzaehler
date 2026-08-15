@@ -48,6 +48,10 @@
     align-items:center; justify-content:center; text-align:center;
     color:var(--text-2); font-size:14px; padding:24px; background:var(--karte);
   }
+  /* WICHTIG: Wenn der Hinweis per Code versteckt wird (hidden),
+     muss das stärker sein als das display:flex darüber – sonst
+     bleibt der Hinweis als Deckel über dem Kamerabild liegen. */
+  .cam .hinweis[hidden]{ display:none !important; }
   .cam .status{
     position:absolute; top:10px; left:10px; right:10px; display:flex; justify-content:center;
   }
@@ -120,7 +124,7 @@
 
   <header>
     <h1>Münzzähler</h1>
-    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v3</b></span>
+    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v4</b></span>
   </header>
 
   <!-- Kamera / Foto-Bereich -->
