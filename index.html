@@ -52,6 +52,53 @@
      muss das stärker sein als das display:flex darüber – sonst
      bleibt der Hinweis als Deckel über dem Kamerabild liegen. */
   .cam .hinweis[hidden]{ display:none !important; }
+
+  /* Runde Knöpfe im Kamerabild (Taschenlampe & Wasserwaage) */
+  .cam-knopf{
+    position:absolute; bottom:10px; z-index:5;
+    width:44px; height:44px; border-radius:50%; padding:0;
+    font-size:20px; line-height:1;
+    background:rgba(12,14,17,.72); backdrop-filter:blur(8px);
+    border:1px solid var(--linie); color:var(--text);
+  }
+  .cam-knopf.an{ background:var(--gold); border-color:var(--gold); }
+
+  /* Wasserwaage: zwei Fadenkreuze übereinander in der Bildmitte */
+  .waage{ position:absolute; inset:0; pointer-events:none; z-index:4; }
+  .waage[hidden]{ display:none; }
+  .kreuz{
+    position:absolute; left:50%; top:50%; width:56px; height:56px;
+    margin:-28px 0 0 -28px; border-radius:50%;
+  }
+  .kreuz.fest{ border:2px solid rgba(255,255,255,.85); }
+  .kreuz.beweglich{ border:2px solid var(--gold); transition:border-color .15s; }
+  .kreuz.beweglich.gerade{ border-color:var(--gruen); }
+  /* kleine Mittelpunkte in beiden Kreuzen */
+  .kreuz::after{
+    content:""; position:absolute; left:50%; top:50%; width:4px; height:4px;
+    margin:-2px 0 0 -2px; border-radius:50%; background:currentColor;
+  }
+  .kreuz.fest{ color:rgba(255,255,255,.85); }
+  .kreuz.beweglich{ color:var(--gold); }
+  .kreuz.beweglich.gerade{ color:var(--gruen); }
+
+  /* Wert-Auswahl beim Antippen einer Münze */
+  .waehler{
+    position:fixed; left:16px; right:16px; bottom:16px; z-index:20;
+    max-width:448px; margin:0 auto; padding:18px;
+    background:var(--karte); border:1px solid var(--linie);
+    border-radius:var(--radius); box-shadow:0 12px 40px rgba(0,0,0,.6);
+  }
+  .waehler[hidden]{ display:none; }
+  .waehler-titel{ font-size:15px; font-weight:600; margin-bottom:12px; text-align:center; }
+  .waehler-gitter{
+    display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-bottom:12px;
+  }
+  .waehler-gitter button{
+    padding:12px 0; font-size:14px; border-radius:12px;
+    background:var(--bg); border:1px solid var(--linie); color:var(--text);
+  }
+  .waehler-gitter button.empfohlen{ border-color:var(--gold); color:var(--gold); }
   .cam .status{
     position:absolute; top:10px; left:10px; right:10px; display:flex; justify-content:center;
   }
@@ -124,7 +171,7 @@
 
   <header>
     <h1>Münzzähler</h1>
-    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v5</b></span>
+    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v7</b></span>
   </header>
 
   <!-- Kamera / Foto-Bereich -->
@@ -137,6 +184,18 @@
       <div>Kamera wird gestartet …<br>Falls keine Freigabe möglich ist, nutze unten <b>„Foto wählen“</b>.</div>
     </div>
     <div class="status" id="statusZeile" hidden><span id="statusText"></span></div>
+
+    <!-- Knöpfe im Kamerabild: Taschenlampe (links) & Wasserwaage (rechts) -->
+    <button class="cam-knopf" id="btnLampe" style="left:10px"  title="Taschenlampe" hidden>🔦</button>
+    <button class="cam-knopf" id="btnWaage" style="right:10px" title="Wasserwaage">⊕</button>
+
+    <!-- Wasserwaage wie in der iOS-Kamera: festes Kreuz (weiß) in der
+         Mitte + bewegliches Kreuz (gold), das der Handy-Neigung folgt.
+         Liegen beide übereinander, ist das Handy waagerecht → grün. -->
+    <div class="waage" id="waage" hidden>
+      <div class="kreuz fest"></div>
+      <div class="kreuz beweglich" id="waageKreuz"></div>
+    </div>
   </div>
 
   <!-- Bedienleiste -->
@@ -176,6 +235,15 @@
       <input type="range" id="rMax" min="40" max="120" value="70">
     </div>
   </details>
+
+  <!-- Wert-Auswahl: erscheint, wenn eine erkannte Münze angetippt wird.
+       Die gewählte Münze dient dann als "Anker" – alle anderen Münzen
+       werden anhand ihrer Größe im Verhältnis dazu neu zugeordnet. -->
+  <div class="waehler" id="waehler" hidden>
+    <div class="waehler-titel">Welche Münze ist das?</div>
+    <div class="waehler-gitter" id="waehlerGitter"></div>
+    <button class="btn-neben" id="btnWaehlerZu" style="width:100%">Abbrechen</button>
+  </div>
 
   <!-- Kurze Anleitung für beste Ergebnisse -->
   <p class="tipps">
@@ -263,6 +331,93 @@ const elChips    = document.getElementById("chips");
 
 let kameraAktiv = false;   // Läuft gerade das Live-Bild?
 let fotoModus   = false;   // Wird gerade ein hochgeladenes Foto angezeigt?
+let kameraSpur  = null;    // Die aktive Kameraspur (für die Taschenlampe)
+
+/* ================================================================
+   TASCHENLAMPE (Kamera-LED)
+   Ein-/Ausschalten über die Kameraspur. Der Knopf ist nur sichtbar,
+   wenn das Gerät die LED im Browser freigibt.
+   ================================================================ */
+const btnLampe = document.getElementById("btnLampe");
+let lampeAn = false;
+
+btnLampe.addEventListener("click", async () => {
+  if (!kameraSpur) return;
+  try {
+    // "torch" = die Foto-LED dauerhaft leuchten lassen
+    await kameraSpur.applyConstraints({ advanced: [{ torch: !lampeAn }] });
+    lampeAn = !lampeAn;
+    btnLampe.classList.toggle("an", lampeAn);
+  } catch (fehler) {
+    status("Taschenlampe wird von diesem Gerät nicht unterstützt");
+  }
+});
+
+/* ================================================================
+   WASSERWAAGE (wie in der iOS-Kamera)
+   Die Bewegungssensoren melden die Neigung des Handys:
+   - beta  = Kippen nach vorne/hinten (in Grad)
+   - gamma = Kippen nach links/rechts (in Grad)
+   Liegt das Handy waagerecht (beide nahe 0°), decken sich die
+   beiden Fadenkreuze und färben sich grün.
+   iOS fragt beim ersten Einschalten nach Erlaubnis für die Sensoren.
+   ================================================================ */
+const btnWaage   = document.getElementById("btnWaage");
+const waage      = document.getElementById("waage");
+const waageKreuz = document.getElementById("waageKreuz");
+let waageAn = false;
+
+// Wie viele Pixel wandert das Kreuz pro Grad Neigung?
+const WAAGE_EMPFINDLICHKEIT = 4;
+// Ab wie viel Grad Abweichung gilt das Handy noch als "gerade"?
+const WAAGE_TOLERANZ_GRAD = 2.5;
+
+function neigungAnzeigen(ereignis) {
+  const vorZurueck   = ereignis.beta  ?? 0;   // Grad
+  const linksRechts  = ereignis.gamma ?? 0;   // Grad
+
+  // Kreuz entsprechend der Neigung verschieben (begrenzt auf ±60 px,
+  // damit es bei starker Neigung nicht aus dem Bild wandert)
+  const begrenzen = (wert) => Math.max(-60, Math.min(60, wert));
+  const dx = begrenzen(linksRechts * WAAGE_EMPFINDLICHKEIT);
+  const dy = begrenzen(vorZurueck  * WAAGE_EMPFINDLICHKEIT);
+  waageKreuz.style.transform = `translate(${dx}px, ${dy}px)`;
+
+  // Grün, wenn beide Neigungen innerhalb der Toleranz liegen
+  const gerade = Math.abs(vorZurueck)  < WAAGE_TOLERANZ_GRAD &&
+                 Math.abs(linksRechts) < WAAGE_TOLERANZ_GRAD;
+  waageKreuz.classList.toggle("gerade", gerade);
+}
+
+btnWaage.addEventListener("click", async () => {
+  // Ausschalten, falls schon an
+  if (waageAn) {
+    waageAn = false;
+    waage.hidden = true;
+    btnWaage.classList.remove("an");
+    window.removeEventListener("deviceorientation", neigungAnzeigen);
+    return;
+  }
+
+  // iOS verlangt eine ausdrückliche Erlaubnis für die Bewegungssensoren –
+  // die Abfrage darf nur direkt nach einem Fingertipp gestellt werden
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" &&
+        typeof DeviceOrientationEvent.requestPermission === "function") {
+      const antwort = await DeviceOrientationEvent.requestPermission();
+      if (antwort !== "granted") {
+        status("Keine Erlaubnis für die Bewegungssensoren");
+        return;
+      }
+    }
+    waageAn = true;
+    waage.hidden = false;
+    btnWaage.classList.add("an");
+    window.addEventListener("deviceorientation", neigungAnzeigen);
+  } catch (fehler) {
+    status("Wasserwaage wird von diesem Gerät nicht unterstützt");
+  }
+});
 
 // ---------- 1) Kamera starten ----------
 // Extra-robust für iPhone/Safari: Wir verlassen uns NICHT auf
@@ -277,6 +432,13 @@ async function kameraStarten() {
       audio: false
     });
     video.srcObject = stream;
+
+    // Kameraspur global merken – brauchen wir für die Taschenlampe.
+    // Der Knopf erscheint nur, wenn das Gerät die LED auch freigibt
+    // (im Browser erst ab iOS 17.4 und nicht auf jedem Modell).
+    kameraSpur = stream.getVideoTracks()[0];
+    const faehigkeiten = kameraSpur.getCapabilities ? kameraSpur.getCapabilities() : {};
+    if (faehigkeiten.torch) btnLampe.hidden = false;
     video.muted = true;                          // Sicherheitshalber nochmal per Code
     video.setAttribute("playsinline", "");       // iPhone: im Fenster statt Vollbild
     video.play().catch(() => {});                // Abspielen anstoßen, Fehler egal
@@ -584,50 +746,83 @@ function farbGruppe(bild, m) {
    (1 € und 2 € sind an ihrer Zweifarbigkeit sofort eindeutig
    und liefern besonders zuverlässige Maßstäbe.)
    ================================================================ */
-function werteZuordnen(muenzen) {
+function werteZuordnen(muenzen, anker) {
   const toleranz = KONFIG.TOLERANZ_PROZENT / 100;
 
   // Welche Münzwerte kommen je Farbgruppe in Frage?
   const passende = (gruppe) => KONFIG.MUENZEN.filter(mz =>
     gruppe === "unbekannt" ? true : mz.gruppe === gruppe);
 
-  // Alle möglichen Maßstäbe sammeln
-  const kandidaten = [];
-  for (const m of muenzen)
-    for (const mz of passende(m.gruppe))
-      kandidaten.push({ massstab: (2 * m.r) / mz.mm, bi: mz.gruppe.startsWith("bi") });
+  let besterMassstab;
+  let mehrdeutig = false;
 
-  let beste = { treffer: -1, fehler: Infinity, massstab: null };
-  for (const k of kandidaten) {
-    let treffer = 0, fehler = 0;
-    for (const m of muenzen) {
-      const mmGemessen = (2 * m.r) / k.massstab;   // Pixelgröße → mm umrechnen
-      // Passt irgendein erlaubter Wert zu dieser mm-Größe?
-      let bester = Infinity;
-      for (const mz of passende(m.gruppe)) {
-        const abw = Math.abs(mmGemessen - mz.mm) / mz.mm;
-        if (abw < bester) bester = abw;
+  if (anker) {
+    // Der Nutzer hat eine Münze angetippt und ihren Wert festgelegt →
+    // daraus ergibt sich der Maßstab direkt und eindeutig.
+    besterMassstab = (2 * anker.muenze.r) / anker.wert.mm;
+  } else {
+    // Automatik: Alle möglichen Maßstäbe sammeln und den nehmen,
+    // der zu den meisten Münzen gleichzeitig passt.
+    const kandidaten = [];
+    for (const m of muenzen)
+      for (const mz of passende(m.gruppe))
+        kandidaten.push({ massstab: (2 * m.r) / mz.mm, bi: mz.gruppe.startsWith("bi") });
+
+    // Hilfsfunktion: Welche Zuordnung ergibt ein Maßstab, wie viele
+    // Münzen passen dabei, und wie groß ist der Gesamtfehler?
+    const bewerten = (massstab) => {
+      let treffer = 0, fehler = 0;
+      const zuordnung = [];
+      for (const m of muenzen) {
+        const mmGemessen = (2 * m.r) / massstab;
+        let wahl = null, beste = Infinity;
+        for (const mz of passende(m.gruppe)) {
+          const abw = Math.abs(mmGemessen - mz.mm) / mz.mm;
+          if (abw < beste) { beste = abw; wahl = mz; }
+        }
+        zuordnung.push(wahl ? wahl.cent : 0);
+        if (beste <= toleranz) { treffer++; fehler += beste; }
       }
-      if (bester <= toleranz) { treffer++; fehler += bester; }
+      return { treffer, fehler, signatur: zuordnung.join(",") };
+    };
+
+    let beste = { treffer: -1, fehler: Infinity };
+    const sigDerBesten = new Set();   // verschiedene Deutungen mit Bestwert
+    for (const k of kandidaten) {
+      const b = bewerten(k.massstab);
+      if (k.bi) b.fehler *= 0.9;   // eindeutige 1€/2€-Anker bevorzugen
+      if (b.treffer > beste.treffer) {
+        beste = b; besterMassstab = k.massstab;
+        sigDerBesten.clear(); sigDerBesten.add(b.signatur);
+      } else if (b.treffer === beste.treffer) {
+        sigDerBesten.add(b.signatur);
+        if (b.fehler < beste.fehler) { beste = b; besterMassstab = k.massstab; }
+      }
     }
-    // Bonus: Maßstäbe aus eindeutigen 1€/2€-Münzen leicht bevorzugen
-    if (k.bi) fehler *= 0.9;
-    if (treffer > beste.treffer || (treffer === beste.treffer && fehler < beste.fehler))
-      beste = { treffer, fehler, massstab: k.massstab };
+
+    // MEHRDEUTIG: Es gibt mehrere, gleich gute Deutungen mit
+    // unterschiedlichem Ergebnis (z. B. nur gleich große Kupfermünzen
+    // im Bild → könnten 1, 2 oder 5 ct sein). Das zeigen wir dem
+    // Nutzer ehrlich an, statt zu raten.
+    mehrdeutig = sigDerBesten.size > 1;
   }
 
-  // Mit dem Gewinner-Maßstab jeder Münze ihren Wert geben
+  // Mit dem gefundenen Maßstab jeder Münze ihren Wert geben
   for (const m of muenzen) {
-    const mmGemessen = (2 * m.r) / beste.massstab;
+    const mmGemessen = (2 * m.r) / besterMassstab;
     let wahl = null, kleinsteAbw = Infinity;
     for (const mz of passende(m.gruppe)) {
       const abw = Math.abs(mmGemessen - mz.mm) / mz.mm;
       if (abw < kleinsteAbw) { kleinsteAbw = abw; wahl = mz; }
     }
     m.wert   = wahl;
-    m.sicher = kleinsteAbw <= toleranz;   // Innerhalb der Toleranz? → sicher
+    // Bei Mehrdeutigkeit gelten alle Münzen als unsicher (gestrichelt)
+    m.sicher = kleinsteAbw <= toleranz && !mehrdeutig;
   }
-  return muenzen;
+  // Die Anker-Münze selbst bekommt exakt den gewählten Wert
+  if (anker) { anker.muenze.wert = anker.wert; anker.muenze.sicher = true; }
+
+  return mehrdeutig;
 }
 
 /* ================================================================
@@ -652,6 +847,8 @@ function ergebnisZeichnen(muenzen) {
   const skala = Math.max(rect.width / arbeit.width, rect.height / arbeit.height);
   const vx = (rect.width  - arbeit.width  * skala) / 2;
   const vy = (rect.height - arbeit.height * skala) / 2;
+  // Für das Antippen von Münzen merken (Rückrechnung Bildschirm → Bild)
+  letzteTransform = { skala, vx, vy };
 
   const gruppenFarbe = { kupfer:"#C77B4A", gold:"#E8B84B", bi1:"#E8B84B", bi2:"#C9CED6", unbekannt:"#8A93A0" };
 
@@ -712,11 +909,63 @@ function summeAnzeigen(muenzen) {
 }
 
 /* ================================================================
+   MÜNZE ANTIPPEN → WERT FESTLEGEN
+   Nach einer Analyse kann jede erkannte Münze angetippt werden.
+   Der gewählte Wert dient als Anker: Daraus ergibt sich der exakte
+   Maßstab, und alle übrigen Münzen werden automatisch neu zugeordnet.
+   So funktioniert die App auch, wenn die Automatik nicht eindeutig
+   entscheiden kann (z. B. nur gleich große Münzen im Bild).
+   ================================================================ */
+let letzteMuenzen   = [];     // Ergebnis der letzten Analyse
+let letzteTransform = null;   // Umrechnung Bild ↔ Bildschirm
+let angetippt       = null;   // Gerade angetippte Münze
+
+const waehler       = document.getElementById("waehler");
+const waehlerGitter = document.getElementById("waehlerGitter");
+document.getElementById("btnWaehlerZu").addEventListener("click", () => waehler.hidden = true);
+
+// Antippen im Kamerabild: Welche erkannte Münze wurde getroffen?
+document.querySelector(".cam").addEventListener("click", (klick) => {
+  if (!letzteMuenzen.length || !letzteTransform) return;
+  const rect = document.querySelector(".cam").getBoundingClientRect();
+  // Bildschirm-Koordinaten → Koordinaten im Analysebild zurückrechnen
+  const ax = (klick.clientX - rect.left - letzteTransform.vx) / letzteTransform.skala;
+  const ay = (klick.clientY - rect.top  - letzteTransform.vy) / letzteTransform.skala;
+
+  // Nächstgelegene Münze suchen (mit etwas Toleranz für dicke Finger)
+  let treffer = null;
+  for (const m of letzteMuenzen)
+    if (Math.hypot(m.x - ax, m.y - ay) < m.r * 1.3) treffer = m;
+  if (!treffer) return;
+
+  // Wert-Auswahl anzeigen; Werte der passenden Farbgruppe hervorheben
+  angetippt = treffer;
+  waehlerGitter.innerHTML = "";
+  for (const mz of KONFIG.MUENZEN) {
+    const knopf = document.createElement("button");
+    knopf.textContent = mz.name;
+    if (treffer.gruppe !== "unbekannt" && mz.gruppe === treffer.gruppe)
+      knopf.classList.add("empfohlen");
+    knopf.addEventListener("click", () => {
+      waehler.hidden = true;
+      // Neuzuordnung ALLER Münzen mit der Nutzer-Angabe als Anker
+      werteZuordnen(letzteMuenzen, { muenze: angetippt, wert: mz });
+      ergebnisZeichnen(letzteMuenzen);
+      summeAnzeigen(letzteMuenzen);
+      status("Werte anhand deiner Angabe neu zugeordnet");
+    });
+    waehlerGitter.appendChild(knopf);
+  }
+  waehler.hidden = false;
+});
+
+/* ================================================================
    HAUPT-ABLAUF: Klick auf "Münzen zählen"
    ================================================================ */
 btnAnalyse.addEventListener("click", () => {
   btnAnalyse.disabled = true;
   status("Analysiere …");
+  waehler.hidden = true;
 
   // Kurz warten, damit der Button-Zustand sichtbar wird,
   // dann die (rechenintensive) Analyse starten
@@ -728,10 +977,14 @@ btnAnalyse.addEventListener("click", () => {
       const kanten  = kantenFinden(bild);                       // Schritt 3
       const muenzen = kreiseSuchen(kanten, bild.width, bild.height); // Schritt 4
       for (const m of muenzen) m.gruppe = farbGruppe(bild, m);  // Schritt 5
-      werteZuordnen(muenzen);                                   // Schritt 6
+      const mehrdeutig = werteZuordnen(muenzen);                // Schritt 6
+      letzteMuenzen = muenzen;                                  // fürs Antippen merken
       ergebnisZeichnen(muenzen);                                // Schritt 7
       summeAnzeigen(muenzen);
-      status(muenzen.length ? "Fertig – Ergebnis prüfen" : "Nichts gefunden – näher ran oder Licht verbessern");
+      if (mehrdeutig)
+        status("Größe nicht eindeutig – tippe eine Münze an und wähle ihren Wert");
+      else
+        status(muenzen.length ? "Fertig – zum Korrigieren Münze antippen" : "Nichts gefunden – näher ran oder Licht verbessern");
     } finally {
       btnAnalyse.disabled = false;
     }
