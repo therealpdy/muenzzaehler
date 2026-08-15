@@ -268,10 +268,27 @@ async function kameraStarten() {
       audio: false
     });
     video.srcObject = stream;
-    await video.play();
-    kameraAktiv = true;
-    camHinweis.hidden = true;
-    status("Bereit – Münzen ins Bild legen und „Münzen zählen“ tippen");
+
+    // WICHTIG für iPhone/Safari: Nicht auf video.play() warten
+    // (das Signal kommt dort manchmal nie an). Stattdessen den
+    // Hinweis ausblenden, sobald wirklich Bilddaten ankommen.
+    const bildIstDa = () => {
+      kameraAktiv = true;
+      camHinweis.hidden = true;
+      status("Bereit – Münzen ins Bild legen und „Münzen zählen“ tippen");
+    };
+    video.addEventListener("loadedmetadata", bildIstDa, { once: true });
+    video.addEventListener("playing",        bildIstDa, { once: true });
+
+    // Abspielen anstoßen; Fehler hier sind unkritisch,
+    // weil die Ereignisse oben den Rest erledigen
+    video.play().catch(() => {});
+
+    // Sicherheitsnetz: Falls nach 3 Sekunden schon Bildgröße
+    // bekannt ist, aber kein Ereignis kam → Hinweis trotzdem weg
+    setTimeout(() => {
+      if (!kameraAktiv && video.videoWidth > 0) bildIstDa();
+    }, 3000);
   } catch (fehler) {
     // Kein Zugriff möglich (z. B. Berechtigung verweigert oder im
     // eingebetteten Fenster gesperrt) → Foto-Auswahl als Ersatzweg.
