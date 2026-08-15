@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Münzzähler – Euro-Münzen erkennen</title>
+<style>
+  /* ============================================================
+     DESIGN (dunkler Tesla/Apple-Look)
+     Farben zentral als Variablen – hier kannst du das Aussehen
+     der ganzen App mit wenigen Änderungen anpassen.
+     ============================================================ */
+  :root{
+    --bg:        #0C0E11;   /* Hintergrund der Seite */
+    --karte:     #14181D;   /* Hintergrund von Karten/Panels */
+    --linie:     #232A32;   /* dezente Trennlinien */
+    --text:      #F2F4F7;   /* Haupttextfarbe */
+    --text-2:    #8A93A0;   /* gedämpfter Text */
+    --gold:      #E8B84B;   /* Akzent: Münzgold (Buttons, Summe) */
+    --kupfer:    #C77B4A;   /* Anzeige Kupfermünzen (1/2/5 ct) */
+    --silber:    #C9CED6;   /* Anzeige Silber-Anteile (1€/2€) */
+    --gruen:     #4CC38A;   /* Erfolg / sichere Erkennung */
+    --radius:    18px;      /* Ecken-Rundung */
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; }
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    display:flex; justify-content:center;
+  }
+  .app{ width:100%; max-width:480px; padding:16px 16px 40px; }
+
+  /* Kopfzeile */
+  header{ padding:10px 2px 18px; display:flex; align-items:baseline; justify-content:space-between; }
+  header h1{ font-size:19px; font-weight:600; letter-spacing:.2px; }
+  header .sub{ font-size:12px; color:var(--text-2); }
+
+  /* Kamera-Bereich */
+  .cam{
+    position:relative; border-radius:var(--radius); overflow:hidden;
+    background:#000; aspect-ratio:3/4; border:1px solid var(--linie);
+  }
+  .cam video, .cam img.foto{ width:100%; height:100%; object-fit:cover; display:block; }
+  .cam canvas.overlay{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .cam .hinweis{
+    position:absolute; inset:0; display:flex; flex-direction:column; gap:10px;
+    align-items:center; justify-content:center; text-align:center;
+    color:var(--text-2); font-size:14px; padding:24px; background:var(--karte);
+  }
+  .cam .status{
+    position:absolute; top:10px; left:10px; right:10px; display:flex; justify-content:center;
+  }
+  .cam .status span{
+    background:rgba(12,14,17,.72); backdrop-filter:blur(8px);
+    border:1px solid var(--linie); color:var(--text-2);
+    font-size:12px; padding:6px 12px; border-radius:999px;
+  }
+
+  /* Bedienleiste unter der Kamera */
+  .leiste{ display:flex; gap:10px; margin-top:14px; }
+  button{
+    font:inherit; border:none; cursor:pointer; border-radius:14px;
+    padding:14px 16px; font-weight:600; font-size:15px;
+    transition:transform .06s ease, opacity .2s ease;
+  }
+  button:active{ transform:scale(.97); }
+  button:disabled{ opacity:.4; cursor:default; }
+  .btn-haupt{ flex:1; background:var(--gold); color:#1A1405; }
+  .btn-neben{ background:var(--karte); color:var(--text); border:1px solid var(--linie); }
+
+  /* Ergebnis: große Summe = Herzstück der App */
+  .summe{
+    margin-top:22px; padding:22px 20px; background:var(--karte);
+    border:1px solid var(--linie); border-radius:var(--radius); text-align:center;
+  }
+  .summe .label{ font-size:12px; text-transform:uppercase; letter-spacing:.14em; color:var(--text-2); }
+  .summe .wert{
+    font-size:54px; font-weight:700; letter-spacing:-1px; margin-top:6px;
+    font-variant-numeric:tabular-nums; color:var(--gold);
+  }
+  .summe .anzahl{ font-size:13px; color:var(--text-2); margin-top:4px; }
+
+  /* Aufschlüsselung: kleine "Münz-Chips" pro Wert */
+  .chips{ display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:16px; }
+  .chip{
+    display:flex; align-items:center; gap:8px; padding:6px 12px 6px 6px;
+    background:var(--bg); border:1px solid var(--linie); border-radius:999px; font-size:13px;
+    font-variant-numeric:tabular-nums;
+  }
+  .chip .muenze{
+    width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:9px; font-weight:700; color:#1A1405;
+  }
+  .chip .muenze.ring{ border:4px solid; }  /* für 1€/2€ (Bimetall) */
+
+  /* Einstellungen (aufklappbar) */
+  details{
+    margin-top:14px; background:var(--karte); border:1px solid var(--linie);
+    border-radius:var(--radius); padding:4px 18px;
+  }
+  summary{ cursor:pointer; padding:14px 0; font-size:14px; font-weight:600; list-style:none; }
+  summary::-webkit-details-marker{ display:none; }
+  .regler{ padding:6px 0 16px; }
+  .regler label{ display:flex; justify-content:space-between; font-size:13px; color:var(--text-2); margin-bottom:6px; }
+  .regler label b{ color:var(--text); font-variant-numeric:tabular-nums; }
+  input[type=range]{ width:100%; accent-color:var(--gold); }
+
+  /* Tipps-Box */
+  .tipps{ margin-top:14px; font-size:12.5px; color:var(--text-2); line-height:1.55; padding:0 6px; }
+  .tipps b{ color:var(--text); }
+
+  /* Barrierefreiheit: sichtbarer Fokus, weniger Bewegung */
+  button:focus-visible, summary:focus-visible{ outline:2px solid var(--gold); outline-offset:2px; }
+  @media (prefers-reduced-motion:reduce){ *{ transition:none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <h1>Münzzähler</h1>
+    <span class="sub">Euro · Kamera-Erkennung</span>
+  </header>
+
+  <!-- Kamera / Foto-Bereich -->
+  <div class="cam">
+    <video id="video" autoplay playsinline muted></video>
+    <img class="foto" id="fotoBild" alt="" hidden>
+    <canvas class="overlay" id="overlay"></canvas>
+    <div class="hinweis" id="camHinweis">
+      <div>📷</div>
+      <div>Kamera wird gestartet …<br>Falls keine Freigabe möglich ist, nutze unten <b>„Foto wählen“</b>.</div>
+    </div>
+    <div class="status" id="statusZeile" hidden><span id="statusText"></span></div>
+  </div>
+
+  <!-- Bedienleiste -->
+  <div class="leiste">
+    <button class="btn-haupt" id="btnAnalyse">Münzen zählen</button>
+    <button class="btn-neben" id="btnFoto">Foto wählen</button>
+    <button class="btn-neben" id="btnZurueck" hidden>Live</button>
+  </div>
+  <!-- Unsichtbares Datei-Feld: öffnet auf dem Handy direkt die Foto-Kamera -->
+  <input type="file" id="dateiInput" accept="image/*" capture="environment" hidden>
+
+  <!-- Ergebnis -->
+  <div class="summe">
+    <div class="label">Gesamtwert</div>
+    <div class="wert" id="gesamt">0,00&nbsp;€</div>
+    <div class="anzahl" id="anzahl">Noch keine Analyse</div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <!-- Einstellungen -->
+  <details>
+    <summary>Einstellungen</summary>
+    <div class="regler">
+      <label>Kanten-Empfindlichkeit <b id="wKante">40</b></label>
+      <input type="range" id="rKante" min="15" max="90" value="40">
+    </div>
+    <div class="regler">
+      <label>Erkennungs-Schwelle <b id="wSchwelle">0.32</b></label>
+      <input type="range" id="rSchwelle" min="15" max="60" value="32">
+    </div>
+    <div class="regler">
+      <label>Kleinste Münze (Pixel) <b id="wMin">14</b></label>
+      <input type="range" id="rMin" min="8" max="40" value="14">
+    </div>
+    <div class="regler">
+      <label>Größte Münze (Pixel) <b id="wMax">70</b></label>
+      <input type="range" id="rMax" min="40" max="120" value="70">
+    </div>
+  </details>
+
+  <!-- Kurze Anleitung für beste Ergebnisse -->
+  <p class="tipps">
+    <b>So klappt’s am besten:</b> Münzen flach und <b>ohne Überlappung</b> auf einen
+    einfarbigen, matten Untergrund legen (z.&nbsp;B. dunkles Papier). Kamera <b>senkrecht
+    von oben</b> halten, gleichmäßiges Licht ohne starke Reflexe. Mindestens zwei
+    verschiedene Münzgrößen im Bild verbessern die Wert-Zuordnung deutlich.
+  </p>
+
+</div>
+
+<script>
+/* ================================================================
+   KONFIGURATION – hier kannst du alles Wichtige anpassen,
+   ohne den restlichen Code verstehen zu müssen.
+   ================================================================ */
+const KONFIG = {
+
+  // Breite, auf die das Bild für die Analyse verkleinert wird.
+  // Kleiner = schneller, aber ungenauer. 480 ist ein guter Mittelweg.
+  ANALYSE_BREITE: 480,
+
+  // Ab welcher "Kantenstärke" ein Pixel als Münzrand zählt.
+  // Niedriger = empfindlicher (findet mehr, aber auch mehr Fehler).
+  KANTEN_SCHWELLE: 40,
+
+  // Wie viele Randpunkte ein Kreis braucht, um als Münze zu gelten.
+  // Angegeben als Anteil des Kreisumfangs (0.32 = 32 %).
+  TREFFER_SCHWELLE: 0.32,
+
+  // Kleinster und größter erwarteter Münz-RADIUS in Pixeln
+  // (bezogen auf das verkleinerte Analysebild).
+  RADIUS_MIN: 14,
+  RADIUS_MAX: 70,
+
+  // Mindestabstand zweier erkannter Münzen zueinander
+  // (als Anteil des Radius; verhindert Doppel-Erkennungen).
+  MIN_ABSTAND_FAKTOR: 1.1,
+
+  // Wie viel Prozent Abweichung beim Durchmesser erlaubt sind,
+  // wenn eine Münze einem Wert zugeordnet wird (7 = ±7 %).
+  TOLERANZ_PROZENT: 7,
+
+  // Offizielle Euro-Münzen: Wert in Cent, Durchmesser in mm,
+  // und Farbgruppe ("kupfer", "gold", "bi1" = 1 €, "bi2" = 2 €).
+  MUENZEN: [
+    { cent:   1, mm: 16.25, gruppe: "kupfer", name: "1 ct"  },
+    { cent:   2, mm: 18.75, gruppe: "kupfer", name: "2 ct"  },
+    { cent:   5, mm: 21.25, gruppe: "kupfer", name: "5 ct"  },
+    { cent:  10, mm: 19.75, gruppe: "gold",   name: "10 ct" },
+    { cent:  20, mm: 22.25, gruppe: "gold",   name: "20 ct" },
+    { cent:  50, mm: 24.25, gruppe: "gold",   name: "50 ct" },
+    { cent: 100, mm: 23.25, gruppe: "bi1",    name: "1 €"   },  // Ring gold, Mitte silber
+    { cent: 200, mm: 25.75, gruppe: "bi2",    name: "2 €"   },  // Ring silber, Mitte gold
+  ],
+};
+
+/* ================================================================
+   AB HIER: PROGRAMM-LOGIK
+   Grober Ablauf, wenn du auf "Münzen zählen" tippst:
+   1) Aktuelles Kamerabild (oder gewähltes Foto) einfrieren
+   2) Bild verkleinern und in Graustufen umwandeln
+   3) Kanten finden (wo ändert sich die Helligkeit stark?)
+   4) Kreise in den Kanten suchen (jede Münze ist ein Kreis)
+   5) Farbe jeder Münze prüfen (Kupfer / Gold / Bimetall)
+   6) Aus den Größenverhältnissen den Münzwert bestimmen
+   7) Summe berechnen und anzeigen
+   ================================================================ */
+
+// ---------- Verweise auf die Bedienelemente der Seite ----------
+const video      = document.getElementById("video");
+const fotoBild   = document.getElementById("fotoBild");
+const overlay    = document.getElementById("overlay");
+const camHinweis = document.getElementById("camHinweis");
+const statusZeile= document.getElementById("statusZeile");
+const statusText = document.getElementById("statusText");
+const btnAnalyse = document.getElementById("btnAnalyse");
+const btnFoto    = document.getElementById("btnFoto");
+const btnZurueck = document.getElementById("btnZurueck");
+const dateiInput = document.getElementById("dateiInput");
+const elGesamt   = document.getElementById("gesamt");
+const elAnzahl   = document.getElementById("anzahl");
+const elChips    = document.getElementById("chips");
+
+let kameraAktiv = false;   // Läuft gerade das Live-Bild?
+let fotoModus   = false;   // Wird gerade ein hochgeladenes Foto angezeigt?
+
+// ---------- 1) Kamera starten ----------
+async function kameraStarten() {
+  try {
+    // Rückkamera bevorzugen ("environment"), in guter Auflösung
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 1280 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    kameraAktiv = true;
+    camHinweis.hidden = true;
+    status("Bereit – Münzen ins Bild legen und „Münzen zählen“ tippen");
+  } catch (fehler) {
+    // Kein Zugriff möglich (z. B. Berechtigung verweigert oder im
+    // eingebetteten Fenster gesperrt) → Foto-Auswahl als Ersatzweg.
+    camHinweis.innerHTML =
+      "<div>🚫</div><div>Kein Kamera-Zugriff möglich.<br>Nutze unten <b>„Foto wählen“</b> – " +
+      "auf dem Handy öffnet das direkt deine Kamera.</div>";
+  }
+}
+
+// Kleine Status-Zeile oben im Kamerabild anzeigen
+function status(text) {
+  statusZeile.hidden = false;
+  statusText.textContent = text;
+}
+
+// ---------- Foto-Auswahl (Ersatzweg ohne Live-Kamera) ----------
+btnFoto.addEventListener("click", () => dateiInput.click());
+
+dateiInput.addEventListener("change", () => {
+  const datei = dateiInput.files[0];
+  if (!datei) return;
+  fotoBild.src = URL.createObjectURL(datei);
+  fotoBild.hidden = false;
+  video.style.display = "none";
+  fotoModus = true;
+  btnZurueck.hidden = false;
+  camHinweis.hidden = true;
+  overlayLeeren();
+  status("Foto geladen – jetzt „Münzen zählen“ tippen");
+});
+
+// Zurück zum Live-Bild wechseln
+btnZurueck.addEventListener("click", () => {
+  fotoModus = false;
+  fotoBild.hidden = true;
+  video.style.display = "";
+  btnZurueck.hidden = true;
+  overlayLeeren();
+  status(kameraAktiv ? "Bereit" : "Keine Kamera – bitte Foto wählen");
+});
+
+// ---------- Einstellungs-Regler mit KONFIG verbinden ----------
+function reglerVerbinden(id, anzeigeId, ziel, teiler = 1) {
+  const regler = document.getElementById(id);
+  const anzeige = document.getElementById(anzeigeId);
+  regler.addEventListener("input", () => {
+    const wert = regler.value / teiler;
+    KONFIG[ziel] = wert;
+    anzeige.textContent = teiler === 1 ? wert : wert.toFixed(2);
+  });
+}
+reglerVerbinden("rKante",    "wKante",    "KANTEN_SCHWELLE");
+reglerVerbinden("rSchwelle", "wSchwelle", "TREFFER_SCHWELLE", 100);
+reglerVerbinden("rMin",      "wMin",      "RADIUS_MIN");
+reglerVerbinden("rMax",      "wMax",      "RADIUS_MAX");
+
+/* ================================================================
+   2) BILD VORBEREITEN
+   Das aktuelle Bild wird auf eine Arbeits-Leinwand (Canvas)
+   gezeichnet und verkleinert. Dort können wir jeden einzelnen
+   Bildpunkt (Pixel) auslesen.
+   ================================================================ */
+const arbeit = document.createElement("canvas");        // unsichtbare Arbeitsfläche
+const arbeitCtx = arbeit.getContext("2d", { willReadFrequently: true });
+
+function bildEinlesen() {
+  // Quelle: entweder das Live-Video oder das gewählte Foto
+  const quelle = fotoModus ? fotoBild : video;
+  const qB = fotoModus ? fotoBild.naturalWidth  : video.videoWidth;
+  const qH = fotoModus ? fotoBild.naturalHeight : video.videoHeight;
+  if (!qB || !qH) return null;   // noch kein Bild vorhanden
+
+  // Verkleinern auf die Analyse-Breite (schneller & rauschärmer)
+  const faktor = KONFIG.ANALYSE_BREITE / qB;
+  arbeit.width  = Math.round(qB * faktor);
+  arbeit.height = Math.round(qH * faktor);
+  arbeitCtx.drawImage(quelle, 0, 0, arbeit.width, arbeit.height);
+  return arbeitCtx.getImageData(0, 0, arbeit.width, arbeit.height);
+}
+
+/* ================================================================
+   3) GRAUSTUFEN + WEICHZEICHNEN + KANTEN FINDEN
+   - Graustufen: Farbe spielt für die Form keine Rolle
+   - Weichzeichnen: kleines Bildrauschen entfernen
+   - Sobel-Filter: misst, wie stark sich die Helligkeit ändert.
+     An Münzrändern ändert sie sich stark → dort sind "Kanten".
+   ================================================================ */
+function kantenFinden(bild) {
+  const b = bild.width, h = bild.height, d = bild.data;
+
+  // --- Graustufen (0 = schwarz, 255 = weiß) ---
+  const grau = new Float32Array(b * h);
+  for (let i = 0; i < b * h; i++) {
+    // Gewichtete Mischung aus Rot, Grün, Blau (wie das Auge sieht)
+    grau[i] = 0.299 * d[i*4] + 0.587 * d[i*4+1] + 0.114 * d[i*4+2];
+  }
+
+  // --- Leichtes Weichzeichnen (3×3-Mittelwert) gegen Rauschen ---
+  const weich = new Float32Array(b * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < b - 1; x++) {
+      let summe = 0;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+          summe += grau[(y + dy) * b + (x + dx)];
+      weich[y * b + x] = summe / 9;
+    }
+  }
+
+  // --- Sobel-Filter: Helligkeits-Änderung in X- und Y-Richtung ---
+  const kanten = [];   // Liste aller starken Kantenpunkte
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < b - 1; x++) {
+      const i = y * b + x;
+      // Änderung nach rechts/links (gx) und oben/unten (gy)
+      const gx = -weich[i-b-1] - 2*weich[i-1] - weich[i+b-1]
+                 +weich[i-b+1] + 2*weich[i+1] + weich[i+b+1];
+      const gy = -weich[i-b-1] - 2*weich[i-b] - weich[i-b+1]
+                 +weich[i+b-1] + 2*weich[i+b] + weich[i+b+1];
+      const staerke = Math.sqrt(gx*gx + gy*gy);
+      if (staerke > KONFIG.KANTEN_SCHWELLE * 4) {
+        // Richtung der Kante merken (zeigt zum Kreismittelpunkt)
+        kanten.push({ x, y, cos: gx / staerke, sin: gy / staerke });
+      }
+    }
+  }
+  return kanten;
+}
+
+/* ================================================================
+   4) KREISE SUCHEN (Hough-Verfahren, vereinfacht erklärt)
+   Idee: Jeder Kantenpunkt einer Münze zeigt mit seiner Richtung
+   auf den Münz-Mittelpunkt. Wir lassen jeden Kantenpunkt für
+   mögliche Mittelpunkte "abstimmen". Wo viele Stimmen zusammen-
+   kommen, liegt der Mittelpunkt einer Münze.
+   ================================================================ */
+function kreiseSuchen(kanten, b, h) {
+  const gefunden = [];
+  const stimmen = new Uint16Array(b * h);   // Stimmzettel-Fläche (wird je Radius wiederverwendet)
+
+  // Wir probieren nacheinander alle möglichen Münzgrößen (Radien) durch
+  for (let r = Math.round(KONFIG.RADIUS_MIN); r <= KONFIG.RADIUS_MAX; r++) {
+    stimmen.fill(0);
+
+    // Jeder Kantenpunkt stimmt für zwei mögliche Mittelpunkte
+    // (die Kante kann nach innen oder außen zeigen)
+    for (const k of kanten) {
+      for (const richtung of [1, -1]) {
+        const mx = Math.round(k.x + richtung * r * k.cos);
+        const my = Math.round(k.y + richtung * r * k.sin);
+        if (mx >= 0 && mx < b && my >= 0 && my < h) stimmen[my * b + mx]++;
+      }
+    }
+
+    // Wie viele Stimmen braucht ein Mittelpunkt mindestens?
+    // → Anteil des Kreisumfangs (2·π·r) laut Einstellung
+    const noetig = 2 * Math.PI * r * KONFIG.TREFFER_SCHWELLE;
+
+    // Lokale Spitzen finden (Punkt muss stärker sein als seine Nachbarn)
+    for (let y = 2; y < h - 2; y++) {
+      for (let x = 2; x < b - 2; x++) {
+        const s = stimmen[y * b + x];
+        if (s < noetig) continue;
+        let spitze = true;
+        for (let dy = -2; dy <= 2 && spitze; dy++)
+          for (let dx = -2; dx <= 2; dx++)
+            if (stimmen[(y+dy) * b + (x+dx)] > s) { spitze = false; break; }
+        if (spitze) gefunden.push({ x, y, r, punkte: s / (2 * Math.PI * r) });
+      }
+    }
+  }
+
+  // Doppelte entfernen: Beste zuerst, zu nahe Nachbarn verwerfen
+  gefunden.sort((a, z) => z.punkte - a.punkte);
+  const muenzen = [];
+  for (const kandidat of gefunden) {
+    const zuNah = muenzen.some(m => {
+      const abstand = Math.hypot(m.x - kandidat.x, m.y - kandidat.y);
+      return abstand < Math.max(m.r, kandidat.r) * KONFIG.MIN_ABSTAND_FAKTOR;
+    });
+    if (!zuNah) muenzen.push(kandidat);
+  }
+  return muenzen;
+}
+
+/* ================================================================
+   5) FARBE PRÜFEN
+   Euro-Münzen unterscheiden sich in der Farbe:
+   - 1/2/5 ct   = Kupfer (rötlich)
+   - 10/20/50 ct = "Gold" (gelblich, Messing)
+   - 1 €        = goldener Ring, silberne Mitte
+   - 2 €        = silberner Ring, goldene Mitte
+   Wir messen die Durchschnittsfarbe in der Mitte und am Rand.
+   ================================================================ */
+function farbeMessen(bild, mx, my, rInnen, rAussen) {
+  const b = bild.width, h = bild.height, d = bild.data;
+  let r = 0, g = 0, bl = 0, n = 0;
+  // Punkte im Kreisring zwischen rInnen und rAussen abtasten
+  for (let winkel = 0; winkel < 360; winkel += 12) {
+    for (let radius = rInnen; radius <= rAussen; radius += Math.max(1, (rAussen - rInnen) / 3)) {
+      const x = Math.round(mx + radius * Math.cos(winkel * Math.PI / 180));
+      const y = Math.round(my + radius * Math.sin(winkel * Math.PI / 180));
+      if (x < 0 || x >= b || y < 0 || y >= h) continue;
+      const i = (y * b + x) * 4;
+      r += d[i]; g += d[i+1]; bl += d[i+2]; n++;
+    }
+  }
+  if (!n) return { farbton: 0, saettigung: 0 };
+  r /= n; g /= n; bl /= n;
+
+  // In "Farbton" (0–360°) und "Sättigung" (0–1) umrechnen –
+  // damit lässt sich Farbe unabhängig von der Helligkeit vergleichen
+  const max = Math.max(r, g, bl), min = Math.min(r, g, bl);
+  const saettigung = max === 0 ? 0 : (max - min) / max;
+  let farbton = 0;
+  if (max !== min) {
+    if (max === r)       farbton = 60 * (((g - bl) / (max - min)) % 6);
+    else if (max === g)  farbton = 60 * ((bl - r) / (max - min) + 2);
+    else                 farbton = 60 * ((r - g)  / (max - min) + 4);
+    if (farbton < 0) farbton += 360;
+  }
+  return { farbton, saettigung };
+}
+
+// Eine gemessene Farbe grob einordnen
+function farbTyp(f) {
+  if (f.saettigung < 0.14) return "silber";           // fast farblos = Silber
+  if (f.farbton < 33 || f.farbton > 330) return "kupfer"; // rötlich = Kupfer
+  if (f.farbton < 70) return "gold";                  // gelblich = Gold/Messing
+  return "silber";                                    // alles andere: eher Silber
+}
+
+// Farbgruppe einer Münze bestimmen (Mitte + Rand vergleichen)
+function farbGruppe(bild, m) {
+  const mitte = farbTyp(farbeMessen(bild, m.x, m.y, 1,        m.r * 0.40));
+  const rand  = farbTyp(farbeMessen(bild, m.x, m.y, m.r*0.68, m.r * 0.88));
+  if (rand === "gold"   && mitte === "silber") return "bi1";    // 1 €
+  if (rand === "silber" && mitte === "gold")   return "bi2";    // 2 €
+  if (rand === "kupfer" || mitte === "kupfer") return "kupfer"; // 1/2/5 ct
+  if (rand === "gold"   || mitte === "gold")   return "gold";   // 10/20/50 ct
+  return "unbekannt";
+}
+
+/* ================================================================
+   6) WERTE ZUORDNEN
+   Problem: Wir kennen die Münzgröße nur in Pixeln, nicht in mm.
+   Lösung: Wir probieren für jede Münze jeden passenden Wert aus
+   und rechnen daraus einen "Maßstab" (Pixel pro mm). Der Maßstab,
+   der zu den MEISTEN Münzen gleichzeitig passt, gewinnt.
+   (1 € und 2 € sind an ihrer Zweifarbigkeit sofort eindeutig
+   und liefern besonders zuverlässige Maßstäbe.)
+   ================================================================ */
+function werteZuordnen(muenzen) {
+  const toleranz = KONFIG.TOLERANZ_PROZENT / 100;
+
+  // Welche Münzwerte kommen je Farbgruppe in Frage?
+  const passende = (gruppe) => KONFIG.MUENZEN.filter(mz =>
+    gruppe === "unbekannt" ? true : mz.gruppe === gruppe);
+
+  // Alle möglichen Maßstäbe sammeln
+  const kandidaten = [];
+  for (const m of muenzen)
+    for (const mz of passende(m.gruppe))
+      kandidaten.push({ massstab: (2 * m.r) / mz.mm, bi: mz.gruppe.startsWith("bi") });
+
+  let beste = { treffer: -1, fehler: Infinity, massstab: null };
+  for (const k of kandidaten) {
+    let treffer = 0, fehler = 0;
+    for (const m of muenzen) {
+      const mmGemessen = (2 * m.r) / k.massstab;   // Pixelgröße → mm umrechnen
+      // Passt irgendein erlaubter Wert zu dieser mm-Größe?
+      let bester = Infinity;
+      for (const mz of passende(m.gruppe)) {
+        const abw = Math.abs(mmGemessen - mz.mm) / mz.mm;
+        if (abw < bester) bester = abw;
+      }
+      if (bester <= toleranz) { treffer++; fehler += bester; }
+    }
+    // Bonus: Maßstäbe aus eindeutigen 1€/2€-Münzen leicht bevorzugen
+    if (k.bi) fehler *= 0.9;
+    if (treffer > beste.treffer || (treffer === beste.treffer && fehler < beste.fehler))
+      beste = { treffer, fehler, massstab: k.massstab };
+  }
+
+  // Mit dem Gewinner-Maßstab jeder Münze ihren Wert geben
+  for (const m of muenzen) {
+    const mmGemessen = (2 * m.r) / beste.massstab;
+    let wahl = null, kleinsteAbw = Infinity;
+    for (const mz of passende(m.gruppe)) {
+      const abw = Math.abs(mmGemessen - mz.mm) / mz.mm;
+      if (abw < kleinsteAbw) { kleinsteAbw = abw; wahl = mz; }
+    }
+    m.wert   = wahl;
+    m.sicher = kleinsteAbw <= toleranz;   // Innerhalb der Toleranz? → sicher
+  }
+  return muenzen;
+}
+
+/* ================================================================
+   7) ERGEBNIS ANZEIGEN
+   - Ringe + Wert-Beschriftung ins Kamerabild zeichnen
+   - Gesamtsumme und Aufschlüsselung unten aktualisieren
+   ================================================================ */
+function overlayLeeren() {
+  const ctx = overlay.getContext("2d");
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+}
+
+function ergebnisZeichnen(muenzen) {
+  // Overlay auf die sichtbare Bildgröße bringen
+  const rect = overlay.getBoundingClientRect();
+  overlay.width  = rect.width  * devicePixelRatio;
+  overlay.height = rect.height * devicePixelRatio;
+  const ctx = overlay.getContext("2d");
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  // Umrechnung: Analysebild → sichtbarer Ausschnitt (object-fit: cover)
+  const skala = Math.max(rect.width / arbeit.width, rect.height / arbeit.height);
+  const vx = (rect.width  - arbeit.width  * skala) / 2;
+  const vy = (rect.height - arbeit.height * skala) / 2;
+
+  const gruppenFarbe = { kupfer:"#C77B4A", gold:"#E8B84B", bi1:"#E8B84B", bi2:"#C9CED6", unbekannt:"#8A93A0" };
+
+  for (const m of muenzen) {
+    const x = vx + m.x * skala, y = vy + m.y * skala, r = m.r * skala;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = gruppenFarbe[m.gruppe] || "#fff";
+    ctx.setLineDash(m.sicher ? [] : [6, 5]);   // unsichere Münzen: gestrichelt
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Beschriftung mit dem erkannten Wert
+    const text = m.wert ? m.wert.name + (m.sicher ? "" : " ?") : "?";
+    ctx.font = "600 13px -apple-system, sans-serif";
+    const breite = ctx.measureText(text).width + 12;
+    ctx.fillStyle = "rgba(12,14,17,.82)";
+    ctx.beginPath(); ctx.roundRect(x - breite/2, y - 11, breite, 22, 11); ctx.fill();
+    ctx.fillStyle = "#F2F4F7";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(text, x, y + 1);
+  }
+}
+
+function summeAnzeigen(muenzen) {
+  // Gesamtwert in Cent addieren
+  let cent = 0;
+  const zaehler = new Map();   // wie oft kommt jeder Wert vor?
+  for (const m of muenzen) {
+    if (!m.wert) continue;
+    cent += m.wert.cent;
+    zaehler.set(m.wert.cent, (zaehler.get(m.wert.cent) || 0) + 1);
+  }
+
+  // Summe als Euro formatieren (deutsches Format, z. B. "3,47 €")
+  elGesamt.textContent = (cent / 100).toLocaleString("de-DE",
+    { style: "currency", currency: "EUR" });
+  elAnzahl.textContent = muenzen.length === 0
+    ? "Keine Münzen erkannt – Tipps unten beachten"
+    : muenzen.length + (muenzen.length === 1 ? " Münze erkannt" : " Münzen erkannt");
+
+  // Aufschlüsselung als kleine Münz-Chips (größter Wert zuerst)
+  elChips.innerHTML = "";
+  [...zaehler.entries()].sort((a, z) => z[0] - a[0]).forEach(([wert, anzahl]) => {
+    const info = KONFIG.MUENZEN.find(mz => mz.cent === wert);
+    const chip = document.createElement("div");
+    chip.className = "chip";
+    const stil = {
+      kupfer: "background:#C77B4A",
+      gold:   "background:#E8B84B",
+      bi1:    "background:#C9CED6;border-color:#E8B84B",  // 1 €: silberne Mitte, Goldring
+      bi2:    "background:#E8B84B;border-color:#C9CED6",  // 2 €: goldene Mitte, Silberring
+    }[info.gruppe];
+    chip.innerHTML =
+      `<span class="muenze ${info.gruppe.startsWith("bi") ? "ring" : ""}" style="${stil}"></span>` +
+      `<span>${anzahl} × ${info.name}</span>`;
+    elChips.appendChild(chip);
+  });
+}
+
+/* ================================================================
+   HAUPT-ABLAUF: Klick auf "Münzen zählen"
+   ================================================================ */
+btnAnalyse.addEventListener("click", () => {
+  btnAnalyse.disabled = true;
+  status("Analysiere …");
+
+  // Kurz warten, damit der Button-Zustand sichtbar wird,
+  // dann die (rechenintensive) Analyse starten
+  setTimeout(() => {
+    try {
+      const bild = bildEinlesen();
+      if (!bild) { status("Kein Bild verfügbar"); return; }
+
+      const kanten  = kantenFinden(bild);                       // Schritt 3
+      const muenzen = kreiseSuchen(kanten, bild.width, bild.height); // Schritt 4
+      for (const m of muenzen) m.gruppe = farbGruppe(bild, m);  // Schritt 5
+      werteZuordnen(muenzen);                                   // Schritt 6
+      ergebnisZeichnen(muenzen);                                // Schritt 7
+      summeAnzeigen(muenzen);
+      status(muenzen.length ? "Fertig – Ergebnis prüfen" : "Nichts gefunden – näher ran oder Licht verbessern");
+    } finally {
+      btnAnalyse.disabled = false;
+    }
+  }, 30);
+});
+
+// Beim Laden der Seite direkt die Kamera anfragen
+kameraStarten();
+</script>
+</body>
+</html>
