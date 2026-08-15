@@ -124,7 +124,7 @@
 
   <header>
     <h1>Münzzähler</h1>
-    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v4</b></span>
+    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v5</b></span>
   </header>
 
   <!-- Kamera / Foto-Bereich -->
@@ -160,12 +160,12 @@
   <details>
     <summary>Einstellungen</summary>
     <div class="regler">
-      <label>Kanten-Empfindlichkeit <b id="wKante">40</b></label>
-      <input type="range" id="rKante" min="15" max="90" value="40">
+      <label>Kanten-Empfindlichkeit <b id="wKante">30</b></label>
+      <input type="range" id="rKante" min="15" max="90" value="30">
     </div>
     <div class="regler">
-      <label>Erkennungs-Schwelle <b id="wSchwelle">0.32</b></label>
-      <input type="range" id="rSchwelle" min="15" max="60" value="32">
+      <label>Erkennungs-Schwelle <b id="wSchwelle">0.25</b></label>
+      <input type="range" id="rSchwelle" min="15" max="60" value="25">
     </div>
     <div class="regler">
       <label>Kleinste Münze (Pixel) <b id="wMin">14</b></label>
@@ -200,11 +200,12 @@ const KONFIG = {
 
   // Ab welcher "Kantenstärke" ein Pixel als Münzrand zählt.
   // Niedriger = empfindlicher (findet mehr, aber auch mehr Fehler).
-  KANTEN_SCHWELLE: 40,
+  // (Mit echten Fotos getestet: 30 funktioniert deutlich besser als 40)
+  KANTEN_SCHWELLE: 30,
 
   // Wie viele Randpunkte ein Kreis braucht, um als Münze zu gelten.
-  // Angegeben als Anteil des Kreisumfangs (0.32 = 32 %).
-  TREFFER_SCHWELLE: 0.32,
+  // Angegeben als Anteil des Kreisumfangs (0.25 = 25 %).
+  TREFFER_SCHWELLE: 0.25,
 
   // Kleinster und größter erwarteter Münz-RADIUS in Pixeln
   // (bezogen auf das verkleinerte Analysebild).
@@ -466,6 +467,25 @@ function kreiseSuchen(kanten, b, h) {
       }
     }
 
+    // WICHTIG (mit echten Fotos getestet): Die Stimmen landen durch
+    // kleine Messungenauigkeiten nicht alle auf exakt demselben Pixel,
+    // sondern streuen auf die Nachbarpixel. Deshalb zählen wir für
+    // jeden Punkt die Stimmen seines 3×3-Umfelds zusammen – erst so
+    // werden die Münzen zuverlässig gefunden.
+    const glatt = new Uint16Array(b * h);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < b - 1; x++) {
+        const i = y * b + x;
+        // Abkürzung: Wo gar keine Stimmen in der Nähe sind, sparen
+        // wir uns die Rechnung (das ist der allergrößte Teil des Bilds)
+        if (!stimmen[i] && !stimmen[i-1] && !stimmen[i+1] &&
+            !stimmen[i-b] && !stimmen[i+b]) continue;
+        glatt[i] = stimmen[i-b-1] + stimmen[i-b] + stimmen[i-b+1]
+                 + stimmen[i-1]   + stimmen[i]   + stimmen[i+1]
+                 + stimmen[i+b-1] + stimmen[i+b] + stimmen[i+b+1];
+      }
+    }
+
     // Wie viele Stimmen braucht ein Mittelpunkt mindestens?
     // → Anteil des Kreisumfangs (2·π·r) laut Einstellung
     const noetig = 2 * Math.PI * r * KONFIG.TREFFER_SCHWELLE;
@@ -473,12 +493,12 @@ function kreiseSuchen(kanten, b, h) {
     // Lokale Spitzen finden (Punkt muss stärker sein als seine Nachbarn)
     for (let y = 2; y < h - 2; y++) {
       for (let x = 2; x < b - 2; x++) {
-        const s = stimmen[y * b + x];
+        const s = glatt[y * b + x];
         if (s < noetig) continue;
         let spitze = true;
         for (let dy = -2; dy <= 2 && spitze; dy++)
           for (let dx = -2; dx <= 2; dx++)
-            if (stimmen[(y+dy) * b + (x+dx)] > s) { spitze = false; break; }
+            if (glatt[(y+dy) * b + (x+dx)] > s) { spitze = false; break; }
         if (spitze) gefunden.push({ x, y, r, punkte: s / (2 * Math.PI * r) });
       }
     }
