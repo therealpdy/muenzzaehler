@@ -171,7 +171,7 @@
 
   <header>
     <h1>Münzzähler</h1>
-    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v10</b></span>
+    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v13</b></span>
   </header>
 
   <!-- Kamera / Foto-Bereich -->
@@ -303,6 +303,26 @@ const KONFIG = {
   // damit die Analyse flüssig läuft).
   ANALYSE_BREITE_LIVE: 380,
 
+  // FEINMESSUNG: Nach der schnellen Grobsuche wird jede gefundene
+  // Münze auf dem hochauflösenden Kamerabild exakt nachvermessen
+  // (auf Bruchteile eines Pixels genau). Das ist entscheidend, weil
+  // sich z. B. 50 ct und 1 € nur um 4,3 % im Durchmesser unterscheiden.
+  FEINMESSUNG: true,
+  FEIN_BREITE: 1280,        // Auflösung der Nachmessung (Einzelbild)
+  FEIN_BREITE_LIVE: 960,    // etwas kleiner im Live-Modus (Tempo)
+  FEIN_STRAHLEN: 36,        // Anzahl der Messstrahlen rund um die Münze
+
+  // NEIGUNGSKORREKTUR: Hältst du das Handy schräg, erscheinen nahe
+  // Münzen größer als ferne. Mit den Bewegungssensoren rechnet die
+  // App diese Verzerrung heraus. Voraussetzung: Die Wasserwaage (⊕)
+  // wurde einmal angetippt und die Sensor-Erlaubnis erteilt.
+  NEIGUNGS_KORREKTUR: true,
+
+  // Geschätzte Brennweite der Handykamera als Anteil der Bildbreite
+  // (0.73 passt für typische Smartphone-Weitwinkel; nur ändern,
+  // wenn die Korrektur systematisch über- oder untersteuert).
+  BRENNWEITE_FAKTOR: 0.73,
+
   // Ab welchem Sättigungs-Unterschied (Ring↔Mitte, verglichen mit dem
   // Durchschnitt aller Münzen im Bild) eine Münze als 1 €/2 € gilt.
   BI_KONTRAST: 0.05,
@@ -395,6 +415,20 @@ const WAAGE_EMPFINDLICHKEIT = 4;
 // Ab wie viel Grad Abweichung gilt das Handy noch als "gerade"?
 const WAAGE_TOLERANZ_GRAD = 2.5;
 
+// Aktuelle Handy-Neigung – wird für Wasserwaage UND
+// Neigungskorrektur der Messung genutzt
+let aktuelleNeigung = null;
+let sensorLauscherAktiv = false;
+
+function neigungEmpfangen(ereignis) {
+  aktuelleNeigung = {
+    beta:  ereignis.beta  ?? 0,
+    gamma: ereignis.gamma ?? 0,
+    zeit:  Date.now(),
+  };
+  if (waageAn) neigungAnzeigen(ereignis);
+}
+
 function neigungAnzeigen(ereignis) {
   const vorZurueck   = ereignis.beta  ?? 0;   // Grad
   const linksRechts  = ereignis.gamma ?? 0;   // Grad
@@ -418,7 +452,8 @@ btnWaage.addEventListener("click", async () => {
     waageAn = false;
     waage.hidden = true;
     btnWaage.classList.remove("an");
-    window.removeEventListener("deviceorientation", neigungAnzeigen);
+    // Sensor-Lauscher bewusst AN lassen: Die Neigungskorrektur der
+    // Messung nutzt ihn auch bei ausgeblendeter Wasserwaage weiter
     return;
   }
 
@@ -436,7 +471,10 @@ btnWaage.addEventListener("click", async () => {
     waageAn = true;
     waage.hidden = false;
     btnWaage.classList.add("an");
-    window.addEventListener("deviceorientation", neigungAnzeigen);
+    if (!sensorLauscherAktiv) {
+      window.addEventListener("deviceorientation", neigungEmpfangen);
+      sensorLauscherAktiv = true;
+    }
   } catch (fehler) {
     status("Wasserwaage wird von diesem Gerät nicht unterstützt");
   }
@@ -714,6 +752,152 @@ function kreiseSuchen(kanten, b, h, rMin = KONFIG.RADIUS_MIN, rMax = KONFIG.RADI
 }
 
 /* ================================================================
+   4b) FEINMESSUNG (Sub-Pixel-Genauigkeit)
+   Die Grobsuche liefert den Radius nur in ganzen Pixeln – bei
+   r ≈ 30 px sind das über 3 % Messfehler, während 50 ct und 1 €
+   sich nur um 4,3 % unterscheiden. Deshalb wird jede Münze auf dem
+   hochauflösenden Bild nachvermessen:
+   Vom Mittelpunkt aus laufen viele "Messstrahlen" nach außen. Auf
+   jedem Strahl wird die exakte Stelle gesucht, an der die Helligkeit
+   am stärksten umschlägt (= der Münzrand), verfeinert auf Bruchteile
+   eines Pixels. Der Median aller Strahlen ergibt den Radius – und
+   nebenbei wird auch der Mittelpunkt korrigiert.
+   ================================================================ */
+
+// Helligkeit an einer Zwischen-Position auslesen (bilinear gemischt
+// aus den vier umliegenden Pixeln – so "sehen" wir zwischen die Pixel)
+function grauWert(d, b, h, x, y) {
+  const x0 = Math.max(0, Math.min(b - 2, Math.floor(x)));
+  const y0 = Math.max(0, Math.min(h - 2, Math.floor(y)));
+  const fx = x - x0, fy = y - y0;
+  const g = (i) => 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
+  const i00 = (y0 * b + x0) * 4;
+  return g(i00)         * (1-fx) * (1-fy) + g(i00 + 4)         * fx * (1-fy)
+       + g(i00 + b * 4) * (1-fx) * fy     + g(i00 + b * 4 + 4) * fx * fy;
+}
+
+// Median einer Zahlenliste (robuster Mittelwert: Ausreißer durch
+// Prägung oder Schatten auf einzelnen Strahlen stören nicht)
+function median(liste) {
+  const s = [...liste].sort((a, z) => a - z);
+  return s[Math.floor(s.length / 2)];
+}
+
+// Einen Kreis auf Bilddaten exakt nachvermessen.
+// Rückgabe: { x, y, r } mit Sub-Pixel-Genauigkeit – oder null,
+// wenn der Rand nicht verlässlich messbar war.
+function kreisNachmessen(d, b, h, cx, cy, R) {
+  const strahlen = KONFIG.FEIN_STRAHLEN;
+
+  // Eine Messrunde: Auf jedem Strahl im Fenster [von..bis] die
+  // Position der STÄRKSTEN Kante bestimmen (sub-pixel-genau).
+  const messRunde = (mx, my, von, bis) => {
+    const radien = [], cosinusse = [], sinusse = [], staerkenListe = [];
+    for (let s = 0; s < strahlen; s++) {
+      const winkel = (s / strahlen) * 2 * Math.PI;
+      const co = Math.cos(winkel), si = Math.sin(winkel);
+      const schritt = 0.5;
+      let vorher = grauWert(d, b, h, mx + von * co, my + von * si);
+      const kanten = [];
+      for (let t = von + schritt; t <= bis; t += schritt) {
+        const jetzt = grauWert(d, b, h, mx + t * co, my + t * si);
+        kanten.push({ t: t - schritt / 2, g: Math.abs(jetzt - vorher) });
+        vorher = jetzt;
+      }
+      let besteStaerke = 0, bestePos = -1, davor = 0, dort = 0, danach = 0;
+      for (let i = 1; i < kanten.length - 1; i++) {
+        if (kanten[i].g > besteStaerke) {
+          besteStaerke = kanten[i].g; bestePos = kanten[i].t;
+          davor = kanten[i-1].g; dort = kanten[i].g; danach = kanten[i+1].g;
+        }
+      }
+      if (besteStaerke < 6 || bestePos < 0) continue;   // kein Rand auf diesem Strahl
+      // Parabel-Trick: Spitze ZWISCHEN den Messpunkten errechnen
+      const nenner = davor - 2 * dort + danach;
+      const feinjustierung = nenner !== 0
+        ? Math.max(-0.5, Math.min(0.5, 0.5 * (davor - danach) / nenner)) : 0;
+      radien.push(bestePos + feinjustierung * schritt);
+      cosinusse.push(co); sinusse.push(si); staerkenListe.push(besteStaerke);
+    }
+    return { radien, cosinusse, sinusse, staerkenListe };
+  };
+
+  // Mittelpunkt aus einer Messrunde korrigieren: Ist er verrutscht,
+  // sind die Strahlen auf einer Seite systematisch länger.
+  const mitteKorrigieren = (runde) => {
+    let dx = 0, dy = 0;
+    for (let i = 0; i < runde.radien.length; i++) {
+      dx += runde.radien[i] * runde.cosinusse[i];
+      dy += runde.radien[i] * runde.sinusse[i];
+    }
+    dx = 2 * dx / runde.radien.length; dy = 2 * dy / runde.radien.length;
+    cx += Math.max(-3, Math.min(3, dx));
+    cy += Math.max(-3, Math.min(3, dy));
+  };
+
+  // --- Runde 1: Präzisionsmessung eng um den Grobradius ---
+  let runde = messRunde(cx, cy, R * 0.85, R * 1.15);
+  if (runde.radien.length < strahlen * 0.5) return null;
+  mitteKorrigieren(runde);
+  runde = messRunde(cx, cy, R * 0.85, R * 1.15);
+  if (runde.radien.length < strahlen * 0.5) return null;
+  let R1 = median(runde.radien);
+  const staerke1 = median(runde.staerkenListe);
+
+  // --- Prägering-Prüfung ---
+  // Euro-Münzen haben einen erhabenen Rand: Dessen INNERE Kante ist
+  // oft kontrastreicher als die Außenkante und kann die Messung
+  // "fangen". Der echte Münzrand läge dann 3–13 % weiter AUSSEN.
+  // Also: Genau dort gezielt nachschauen – finden die meisten
+  // Strahlen dort eine ordentliche Kante, ist DAS der wahre Rand.
+  const aussen = messRunde(cx, cy, R1 * 1.03, R1 * 1.13);
+  if (aussen.radien.length >= strahlen * 0.5 &&
+      median(aussen.staerkenListe) >= staerke1 * 0.5) {
+    R1 = median(aussen.radien);
+    mitteKorrigieren(aussen);
+    // Abschluss: enge Präzisionsmessung um den gefundenen Außenrand
+    const fein2 = messRunde(cx, cy, R1 * 0.94, R1 * 1.06);
+    if (fein2.radien.length >= strahlen * 0.5) R1 = median(fein2.radien);
+  }
+
+  return { x: cx, y: cy, r: R1 };
+}
+
+// Alle gefundenen Münzen auf dem hochauflösenden Bild nachvermessen
+const fein = document.createElement("canvas");
+const feinCtx = fein.getContext("2d", { willReadFrequently: true });
+
+function feinMessen(muenzen, istLive) {
+  if (!KONFIG.FEINMESSUNG || !muenzen.length) return;
+
+  // Quelle in hoher Auflösung auf die Fein-Leinwand zeichnen
+  const quelle = fotoModus ? fotoBild : video;
+  const qB = fotoModus ? fotoBild.naturalWidth  : video.videoWidth;
+  const qH = fotoModus ? fotoBild.naturalHeight : video.videoHeight;
+  if (!qB || !qH) return;
+  const zielB = Math.min(qB, istLive ? KONFIG.FEIN_BREITE_LIVE : KONFIG.FEIN_BREITE);
+  fein.width  = zielB;
+  fein.height = Math.round(qH * zielB / qB);
+  feinCtx.drawImage(quelle, 0, 0, fein.width, fein.height);
+  const d = feinCtx.getImageData(0, 0, fein.width, fein.height).data;
+
+  // Umrechnungsfaktor: Analysebild → hochauflösendes Bild
+  const f = fein.width / arbeit.width;
+
+  for (const m of muenzen) {
+    const exakt = kreisNachmessen(d, fein.width, fein.height, m.x * f, m.y * f, m.r * f);
+    if (exakt) {
+      // Ergebnis zurück in Analysebild-Koordinaten (als Kommazahl –
+      // die Genauigkeit bleibt dabei voll erhalten)
+      m.x = exakt.x / f;
+      m.y = exakt.y / f;
+      m.r = exakt.r / f;
+    }
+    // Wenn die Nachmessung scheitert, bleibt der Grobwert bestehen
+  }
+}
+
+/* ================================================================
    5) FARBE PRÜFEN
    Euro-Münzen unterscheiden sich in der Farbe:
    - 1/2/5 ct   = Kupfer (rötlich)
@@ -806,6 +990,10 @@ function farbGruppenZuweisen(bild, muenzen) {
    (1 € und 2 € sind an ihrer Zweifarbigkeit sofort eindeutig
    und liefern besonders zuverlässige Maßstäbe.)
    ================================================================ */
+// Güte der letzten Wert-Zuordnung (kleiner = besser); wird von
+// werteZuordnen befüllt und von der Neigungskorrektur ausgewertet
+let letzteGuete = Infinity;
+
 function werteZuordnen(muenzen, anker) {
   const toleranz = KONFIG.TOLERANZ_PROZENT / 100;
 
@@ -899,17 +1087,79 @@ function werteZuordnen(muenzen, anker) {
     mehrdeutig = sigDerBesten.size > 1;
   }
 
-  // Mit dem gefundenen Maßstab jeder Münze ihren Wert geben
+  // Mit dem gefundenen Maßstab jeder Münze ihren Wert geben.
+  // Nebenbei berechnen wir eine "Güte" der gesamten Zuordnung
+  // (Summe der Abweichungen; nicht passende Münzen zählen schwer) –
+  // die Neigungskorrektur nutzt sie, um die beste Variante zu wählen.
+  letzteGuete = 0;
   for (const m of muenzen) {
     const { wahl, abwRoh } = besterWert(m, besterMassstab);
     m.wert   = wahl;
     // Bei Mehrdeutigkeit gelten alle Münzen als unsicher (gestrichelt)
     m.sicher = abwRoh <= toleranz && !mehrdeutig;
+    letzteGuete += abwRoh <= toleranz ? abwRoh : 10;
   }
   // Die Anker-Münze selbst bekommt exakt den gewählten Wert
   if (anker) { anker.muenze.wert = anker.wert; anker.muenze.sicher = true; }
 
   return mehrdeutig;
+}
+
+/* ================================================================
+   6b) NEIGUNGSKORREKTUR
+   Ist das Handy beim Messen gekippt, sind nahe Münzen im Bild
+   größer abgebildet als ferne – die Größenverhältnisse stimmen
+   dann nicht mehr. Aus der Sensor-Neigung (Wasserwaage) lässt sich
+   diese Verzerrung herausrechnen: Je weiter eine Münze in Richtung
+   "bergauf" liegt, desto stärker wird ihr Radius vergrößert.
+
+   Trick: Die Vorzeichen-Konventionen der Sensoren sind je nach
+   Gerät/Lage verwirrend. Statt sie fest zu verdrahten, probiert
+   die App alle 4 Korrektur-Richtungen UND die unkorrigierte
+   Variante durch und behält die, deren Münzgrößen am besten zu
+   echten Euro-Maßen passen (kleinste "Güte" aus werteZuordnen).
+   Die Korrektur kann das Ergebnis dadurch nie verschlechtern.
+   ================================================================ */
+function neigungKorrigieren(muenzen, b, h) {
+  if (!KONFIG.NEIGUNGS_KORREKTUR || !aktuelleNeigung || muenzen.length < 2) return false;
+  // Sensordaten müssen frisch sein (sonst lieber nicht korrigieren)
+  if (Date.now() - aktuelleNeigung.zeit > 2000) return false;
+
+  const beta = aktuelleNeigung.beta, gamma = aktuelleNeigung.gamma;
+  // Praktisch gerade → keine Korrektur nötig
+  if (Math.abs(beta) < 2 && Math.abs(gamma) < 2) return false;
+  // Zu schräg → die Näherungsformel wird ungenau, lieber lassen
+  if (Math.abs(beta) > 35 || Math.abs(gamma) > 35) return false;
+
+  const fpx = KONFIG.BRENNWEITE_FAKTOR * b;   // Brennweite in Pixeln (geschätzt)
+  const tb = Math.tan(beta  * Math.PI / 180);
+  const tg = Math.tan(gamma * Math.PI / 180);
+  const original = muenzen.map(m => m.r);
+
+  // Kandidat "keine Korrektur" als Ausgangs-Bestwert
+  werteZuordnen(muenzen);
+  let besteGuete  = letzteGuete;
+  let besteRadien = original;
+
+  // Alle 4 Vorzeichen-Kombinationen durchprobieren
+  for (const sB of [1, -1]) {
+    for (const sG of [1, -1]) {
+      const radien = muenzen.map((m, i) => {
+        const u = m.x - b / 2, v = m.y - h / 2;   // Abstand zur Bildmitte
+        let faktor = 1 + (sB * tb * v + sG * tg * u) / fpx;
+        faktor = Math.max(0.75, Math.min(1.25, faktor));   // Sicherheitsgrenzen
+        return original[i] * faktor;
+      });
+      muenzen.forEach((m, i) => m.r = radien[i]);
+      werteZuordnen(muenzen);
+      if (letzteGuete < besteGuete) { besteGuete = letzteGuete; besteRadien = radien; }
+    }
+  }
+
+  // Beste Variante endgültig übernehmen
+  const korrigiert = besteRadien !== original;
+  muenzen.forEach((m, i) => m.r = besteRadien[i]);
+  return korrigiert;
 }
 
 /* ================================================================
@@ -1081,18 +1331,46 @@ function analyseDurchfuehren(istLive) {
   }
   liveFehlversuche = 0;
 
+  feinMessen(muenzen, istLive);                                    // Schritt 4b
+  const geneigt = neigungKorrigieren(muenzen, bild.width, bild.height); // Schritt 6b (vorab)
+
   farbGruppenZuweisen(bild, muenzen);                              // Schritt 5
 
   // MÜNZ-VERFOLGUNG: Münzen von Bild zu Bild wiedererkennen (nach
-  // Position). So bleibt ein per Antippen festgelegter Anker-Wert
-  // erhalten, auch wenn die Kamera leicht wandert oder neue Münzen
-  // dazukommen.
+  // Position). Das liefert drei Dinge:
+  // 1. Ein per Antippen festgelegter Anker-Wert bleibt erhalten
+  // 2. GLÄTTUNG: Der gemessene Radius zittert von Bild zu Bild um
+  //    ±1 Pixel – bei 50 ct vs. 1 € (nur 4 % Größenunterschied!)
+  //    kippt das ständig die Zuordnung. Deshalb mitteln wir den
+  //    Radius über die Zeit (70 % alter Wert, 30 % neue Messung).
+  // 3. GEDÄCHTNIS: Farbgruppe und Wert wechseln erst, wenn die neue
+  //    Messung mehrere Bilder in Folge dasselbe sagt (siehe unten).
   for (const m of muenzen) {
     for (const alt of letzteMuenzen) {
-      if (alt.fixiert && Math.hypot(alt.x - m.x, alt.y - m.y) < Math.max(alt.r, m.r) * 0.8) {
-        m.fixiert = true; m.fixWert = alt.fixWert;
+      if (Math.hypot(alt.x - m.x, alt.y - m.y) < Math.max(alt.r, m.r) * 0.8) {
+        m.vorgaenger = alt;                      // Verweis fürs Gedächtnis
+        if (istLive) {
+          m.r = alt.r * 0.7 + m.r * 0.3;         // Radius über Zeit mitteln
+          m.x = alt.x * 0.5 + m.x * 0.5;         // Position leicht glätten
+          m.y = alt.y * 0.5 + m.y * 0.5;
+        }
+        if (alt.fixiert) { m.fixiert = true; m.fixWert = alt.fixWert; }
         break;
       }
+    }
+  }
+
+  // FARBGRUPPEN-GEDÄCHTNIS: Die Farbmessung kann in einzelnen
+  // Bildern danebenliegen (Glanz, Bewegung). Eine Münze wechselt
+  // ihre Gruppe deshalb erst, wenn die neue Messung 3 Bilder in
+  // Folge dasselbe sagt – einzelne Ausrutscher werden ignoriert.
+  if (istLive) {
+    for (const m of muenzen) {
+      const alt = m.vorgaenger;
+      if (!alt || !alt.gruppe || alt.gruppe === m.gruppe) { m.gruppenSerie = 0; continue; }
+      m.gruppenSerie = (m.gruppe === alt.gruppenKandidat) ? (alt.gruppenSerie || 0) + 1 : 1;
+      m.gruppenKandidat = m.gruppe;
+      if (m.gruppenSerie < 3) m.gruppe = alt.gruppe;   // alte Gruppe behalten
     }
   }
 
@@ -1100,6 +1378,23 @@ function analyseDurchfuehren(istLive) {
   const fix = muenzen.find(m => m.fixiert);
   const mehrdeutig = werteZuordnen(muenzen,
     fix ? { muenze: fix, wert: fix.fixWert } : undefined);         // Schritt 6
+
+  // WERT-GEDÄCHTNIS: Gleiche Logik für den zugeordneten Wert –
+  // ein einmal erkannter Wert wechselt erst, wenn die neue Zuordnung
+  // 3 Bilder in Folge stabil ist. Das verhindert das Springen der
+  // Gesamtsumme, das durch Messrauschen entsteht.
+  if (istLive) {
+    for (const m of muenzen) {
+      const alt = m.vorgaenger;
+      if (!alt || !alt.wert || !m.wert || m.fixiert) { m.wertSerie = 0; continue; }
+      if (alt.wert.cent === m.wert.cent) { m.wertSerie = 0; continue; }
+      m.wertSerie = (m.wert.cent === alt.wertKandidat) ? (alt.wertSerie || 0) + 1 : 1;
+      m.wertKandidat = m.wert.cent;
+      if (m.wertSerie < 3) { m.wert = alt.wert; m.sicher = alt.sicher; }
+    }
+  }
+  // Verweise aufräumen (sonst wächst eine Kette über alle Bilder)
+  for (const m of muenzen) m.vorgaenger = null;
 
   letzteMuenzen = muenzen;
   ergebnisZeichnen(muenzen);                                       // Schritt 7
@@ -1115,7 +1410,8 @@ function analyseDurchfuehren(istLive) {
   if (mehrdeutig)
     status("Größe nicht eindeutig – tippe eine Münze an und wähle ihren Wert");
   else if (istLive)
-    status("Live · " + muenzen.length + (muenzen.length === 1 ? " Münze" : " Münzen"));
+    status("Live · " + muenzen.length + (muenzen.length === 1 ? " Münze" : " Münzen")
+           + (geneigt ? " · Neigung ausgeglichen" : ""));
   else
     status(muenzen.length ? "Fertig – zum Korrigieren Münze antippen" : "Nichts gefunden – näher ran oder Licht verbessern");
 }
