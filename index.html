@@ -171,7 +171,7 @@
 
   <header>
     <h1>Münzzähler</h1>
-    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v8</b></span>
+    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v10</b></span>
   </header>
 
   <!-- Kamera / Foto-Bereich -->
@@ -201,6 +201,7 @@
   <!-- Bedienleiste -->
   <div class="leiste">
     <button class="btn-haupt" id="btnAnalyse">Münzen zählen</button>
+    <button class="btn-neben" id="btnLive">Live</button>
     <button class="btn-neben" id="btnFoto">Foto wählen</button>
     <button class="btn-neben" id="btnZurueck" hidden>Live</button>
   </div>
@@ -283,6 +284,28 @@ const KONFIG = {
   // Mindestabstand zweier erkannter Münzen zueinander
   // (als Anteil des Radius; verhindert Doppel-Erkennungen).
   MIN_ABSTAND_FAKTOR: 1.1,
+
+  // Kleine Kreise entstehen oft fälschlich durch Glanzpunkte oder
+  // Muster im Untergrund. Deshalb brauchen kleine Kreise mehr
+  // "Beweise": Die Erkennungs-Schwelle steigt für die kleinsten
+  // Radien um bis zu diesen Zuschlag (0.12 = +12 Prozentpunkte).
+  SCHWELLE_KLEIN_ZUSCHLAG: 0.12,
+
+  // Münzen, die über den Bildrand hinausragen, werden falsch
+  // gemessen und verzerren den Maßstab → aussortieren (true/false).
+  RAND_FILTER: true,
+
+  // LIVE-MODUS: Pause zwischen zwei Analysen in Millisekunden.
+  // Kleiner = flüssiger, aber mehr Akkuverbrauch.
+  LIVE_PAUSE_MS: 150,
+
+  // Bildbreite im Live-Modus (kleiner als beim Einzelfoto,
+  // damit die Analyse flüssig läuft).
+  ANALYSE_BREITE_LIVE: 380,
+
+  // Ab welchem Sättigungs-Unterschied (Ring↔Mitte, verglichen mit dem
+  // Durchschnitt aller Münzen im Bild) eine Münze als 1 €/2 € gilt.
+  BI_KONTRAST: 0.05,
 
   // Wie viel Prozent Abweichung beim Durchmesser erlaubt sind,
   // wenn eine Münze einem Wert zugeordnet wird (7 = ±7 %).
@@ -494,6 +517,7 @@ function status(text) {
 btnFoto.addEventListener("click", () => dateiInput.click());
 
 dateiInput.addEventListener("change", () => {
+  liveStoppen();   // Live-Modus beenden, wenn ein Foto geladen wird
   const datei = dateiInput.files[0];
   if (!datei) return;
   fotoBild.src = URL.createObjectURL(datei);
@@ -508,6 +532,7 @@ dateiInput.addEventListener("change", () => {
 
 // Zurück zum Live-Bild wechseln
 btnZurueck.addEventListener("click", () => {
+  liveStoppen();
   fotoModus = false;
   fotoBild.hidden = true;
   video.style.display = "";
@@ -540,7 +565,7 @@ reglerVerbinden("rMax",      "wMax",      "RADIUS_MAX");
 const arbeit = document.createElement("canvas");        // unsichtbare Arbeitsfläche
 const arbeitCtx = arbeit.getContext("2d", { willReadFrequently: true });
 
-function bildEinlesen() {
+function bildEinlesen(breite = KONFIG.ANALYSE_BREITE) {
   // Quelle: entweder das Live-Video oder das gewählte Foto
   const quelle = fotoModus ? fotoBild : video;
   const qB = fotoModus ? fotoBild.naturalWidth  : video.videoWidth;
@@ -548,7 +573,7 @@ function bildEinlesen() {
   if (!qB || !qH) return null;   // noch kein Bild vorhanden
 
   // Verkleinern auf die Analyse-Breite (schneller & rauschärmer)
-  const faktor = KONFIG.ANALYSE_BREITE / qB;
+  const faktor = breite / qB;
   arbeit.width  = Math.round(qB * faktor);
   arbeit.height = Math.round(qH * faktor);
   arbeitCtx.drawImage(quelle, 0, 0, arbeit.width, arbeit.height);
@@ -611,12 +636,12 @@ function kantenFinden(bild) {
    mögliche Mittelpunkte "abstimmen". Wo viele Stimmen zusammen-
    kommen, liegt der Mittelpunkt einer Münze.
    ================================================================ */
-function kreiseSuchen(kanten, b, h) {
+function kreiseSuchen(kanten, b, h, rMin = KONFIG.RADIUS_MIN, rMax = KONFIG.RADIUS_MAX) {
   const gefunden = [];
   const stimmen = new Uint16Array(b * h);   // Stimmzettel-Fläche (wird je Radius wiederverwendet)
 
   // Wir probieren nacheinander alle möglichen Münzgrößen (Radien) durch
-  for (let r = Math.round(KONFIG.RADIUS_MIN); r <= KONFIG.RADIUS_MAX; r++) {
+  for (let r = Math.round(rMin); r <= rMax; r++) {
     stimmen.fill(0);
 
     // Jeder Kantenpunkt stimmt für zwei mögliche Mittelpunkte
@@ -649,14 +674,23 @@ function kreiseSuchen(kanten, b, h) {
     }
 
     // Wie viele Stimmen braucht ein Mittelpunkt mindestens?
-    // → Anteil des Kreisumfangs (2·π·r) laut Einstellung
-    const noetig = 2 * Math.PI * r * KONFIG.TREFFER_SCHWELLE;
+    // → Anteil des Kreisumfangs (2·π·r) laut Einstellung.
+    // Kleine Kreise bekommen einen Zuschlag, weil Glanzpunkte und
+    // Untergrund-Muster fast immer als KLEINE Kreise auftauchen.
+    const spanne  = Math.max(1, KONFIG.RADIUS_MAX - KONFIG.RADIUS_MIN);
+    const zuschlag = KONFIG.SCHWELLE_KLEIN_ZUSCHLAG *
+                     (1 - (r - KONFIG.RADIUS_MIN) / spanne);
+    const noetig = 2 * Math.PI * r * (KONFIG.TREFFER_SCHWELLE + zuschlag);
 
     // Lokale Spitzen finden (Punkt muss stärker sein als seine Nachbarn)
     for (let y = 2; y < h - 2; y++) {
       for (let x = 2; x < b - 2; x++) {
         const s = glatt[y * b + x];
         if (s < noetig) continue;
+        // Bildrand-Filter: Ragt der Kreis über den Rand hinaus,
+        // ist die Größenmessung unbrauchbar → überspringen
+        if (KONFIG.RAND_FILTER &&
+            (x - r < 3 || y - r < 3 || x + r > b - 3 || y + r > h - 3)) continue;
         let spitze = true;
         for (let dy = -2; dy <= 2 && spitze; dy++)
           for (let dx = -2; dx <= 2; dx++)
@@ -726,15 +760,41 @@ function farbTyp(f) {
   return "silber";                                    // alles andere: eher Silber
 }
 
-// Farbgruppe einer Münze bestimmen (Mitte + Rand vergleichen)
-function farbGruppe(bild, m) {
-  const mitte = farbTyp(farbeMessen(bild, m.x, m.y, 1,        m.r * 0.40));
-  const rand  = farbTyp(farbeMessen(bild, m.x, m.y, m.r*0.68, m.r * 0.88));
-  if (rand === "gold"   && mitte === "silber") return "bi1";    // 1 €
-  if (rand === "silber" && mitte === "gold")   return "bi2";    // 2 €
-  if (rand === "kupfer" || mitte === "kupfer") return "kupfer"; // 1/2/5 ct
-  if (rand === "gold"   || mitte === "gold")   return "gold";   // 10/20/50 ct
-  return "unbekannt";
+// Farbgruppen für ALLE Münzen gemeinsam bestimmen.
+// Warum gemeinsam? Kunstlicht verschiebt alle Farben gleichermaßen –
+// absolute Werte täuschen dann. Was aber immer bleibt: 1 €/2 € haben
+// einen SÄTTIGUNGS-UNTERSCHIED zwischen Ring und Mitte, einfarbige
+// Münzen nicht. Deshalb vergleichen wir jede Münze mit dem
+// Durchschnitt aller Münzen im Bild – Bimetall fällt als Ausreißer auf.
+function farbGruppenZuweisen(bild, muenzen) {
+  // Schritt 1: Ring und Mitte jeder Münze vermessen
+  for (const m of muenzen) {
+    m.mitteF = farbeMessen(bild, m.x, m.y, 1,        m.r * 0.40);
+    m.randF  = farbeMessen(bild, m.x, m.y, m.r*0.68, m.r * 0.88);
+    m.kontrast = m.randF.saettigung - m.mitteF.saettigung;
+  }
+
+  // Schritt 2: Typischer Kontrast im Bild (Median = robuster Mittelwert)
+  const werte = muenzen.map(m => m.kontrast).sort((a, z) => a - z);
+  const median = werte.length ? werte[Math.floor(werte.length / 2)] : 0;
+
+  // Schritt 3: Gruppe zuweisen
+  for (const m of muenzen) {
+    const mitte = farbTyp(m.mitteF);
+    const rand  = farbTyp(m.randF);
+
+    // Klarer Fall: Ring und Mitte eindeutig verschiedenfarbig
+    if      (rand === "gold"   && mitte === "silber") m.gruppe = "bi1";
+    else if (rand === "silber" && mitte === "gold")   m.gruppe = "bi2";
+    // Ausreißer-Fall: Kontrast weicht deutlich vom Bild-Median ab
+    // (funktioniert auch bei Glanz und farbstichigem Licht)
+    else if (m.kontrast - median >  KONFIG.BI_KONTRAST) m.gruppe = "bi1"; // Ring farbiger → 1 €
+    else if (m.kontrast - median < -KONFIG.BI_KONTRAST) m.gruppe = "bi2"; // Mitte farbiger → 2 €
+    // Einfarbige Münzen
+    else if (rand === "kupfer" || mitte === "kupfer") m.gruppe = "kupfer";
+    else if (rand === "gold"   || mitte === "gold")   m.gruppe = "gold";
+    else m.gruppe = "unbekannt";
+  }
 }
 
 /* ================================================================
@@ -975,6 +1035,11 @@ document.querySelector(".cam").addEventListener("click", (klick) => {
       knopf.classList.add("empfohlen");
     knopf.addEventListener("click", () => {
       waehler.hidden = true;
+      // Anker dauerhaft an dieser Münze festmachen – die Münz-
+      // Verfolgung reicht ihn im Live-Modus von Bild zu Bild weiter
+      for (const m of letzteMuenzen) { m.fixiert = false; m.fixWert = null; }
+      angetippt.fixiert = true;
+      angetippt.fixWert = mz;
       // Neuzuordnung ALLER Münzen mit der Nutzer-Angabe als Anker
       werteZuordnen(letzteMuenzen, { muenze: angetippt, wert: mz });
       ergebnisZeichnen(letzteMuenzen);
@@ -987,7 +1052,112 @@ document.querySelector(".cam").addEventListener("click", (klick) => {
 });
 
 /* ================================================================
-   HAUPT-ABLAUF: Klick auf "Münzen zählen"
+   ANALYSE (gemeinsamer Kern für Einzelbild und Live-Modus)
+   ================================================================ */
+// Merker für den Live-Modus: eingeschränkter Radius-Suchbereich
+// (nach dem ersten Treffer suchen wir nur noch um die tatsächliche
+// Münzgröße herum – das macht jeden Durchlauf um ein Vielfaches schneller)
+let liveRMin = null, liveRMax = null;
+let liveFehlversuche = 0;   // Flacker-Schutz: kurze Aussetzer überbrücken
+
+function analyseDurchfuehren(istLive) {
+  const bild = bildEinlesen(istLive ? KONFIG.ANALYSE_BREITE_LIVE : KONFIG.ANALYSE_BREITE);
+  if (!bild) { if (!istLive) status("Kein Bild verfügbar"); return; }
+
+  // Im Live-Modus: eingeschränkten Suchbereich nutzen, falls vorhanden
+  const rMin = (istLive && liveRMin) ? liveRMin : KONFIG.RADIUS_MIN;
+  const rMax = (istLive && liveRMax) ? liveRMax : KONFIG.RADIUS_MAX;
+
+  const kanten  = kantenFinden(bild);                              // Schritt 3
+  const muenzen = kreiseSuchen(kanten, bild.width, bild.height, rMin, rMax); // Schritt 4
+
+  // Flacker-Schutz: Findet ein Live-Durchlauf kurz nichts (z. B. bei
+  // Bewegungsunschärfe), behalten wir das letzte Ergebnis 3 Durchläufe
+  // lang bei, statt die Anzeige leerzuräumen.
+  if (istLive && muenzen.length === 0 && letzteMuenzen.length > 0 && liveFehlversuche < 3) {
+    liveFehlversuche++;
+    liveRMin = liveRMax = null;   // nächster Durchlauf wieder mit vollem Bereich
+    return;
+  }
+  liveFehlversuche = 0;
+
+  farbGruppenZuweisen(bild, muenzen);                              // Schritt 5
+
+  // MÜNZ-VERFOLGUNG: Münzen von Bild zu Bild wiedererkennen (nach
+  // Position). So bleibt ein per Antippen festgelegter Anker-Wert
+  // erhalten, auch wenn die Kamera leicht wandert oder neue Münzen
+  // dazukommen.
+  for (const m of muenzen) {
+    for (const alt of letzteMuenzen) {
+      if (alt.fixiert && Math.hypot(alt.x - m.x, alt.y - m.y) < Math.max(alt.r, m.r) * 0.8) {
+        m.fixiert = true; m.fixWert = alt.fixWert;
+        break;
+      }
+    }
+  }
+
+  // Falls ein Anker (angetippte Münze) existiert, gibt er den Maßstab vor
+  const fix = muenzen.find(m => m.fixiert);
+  const mehrdeutig = werteZuordnen(muenzen,
+    fix ? { muenze: fix, wert: fix.fixWert } : undefined);         // Schritt 6
+
+  letzteMuenzen = muenzen;
+  ergebnisZeichnen(muenzen);                                       // Schritt 7
+  summeAnzeigen(muenzen);
+
+  // Suchbereich fürs nächste Live-Bild auf die gefundenen Größen eingrenzen
+  if (istLive && muenzen.length) {
+    const radien = muenzen.map(m => m.r);
+    liveRMin = Math.max(KONFIG.RADIUS_MIN, Math.min(...radien) - 5);
+    liveRMax = Math.min(KONFIG.RADIUS_MAX, Math.max(...radien) + 5);
+  }
+
+  if (mehrdeutig)
+    status("Größe nicht eindeutig – tippe eine Münze an und wähle ihren Wert");
+  else if (istLive)
+    status("Live · " + muenzen.length + (muenzen.length === 1 ? " Münze" : " Münzen"));
+  else
+    status(muenzen.length ? "Fertig – zum Korrigieren Münze antippen" : "Nichts gefunden – näher ran oder Licht verbessern");
+}
+
+/* ================================================================
+   LIVE-MODUS
+   Analysiert das Kamerabild in Dauerschleife. Der nächste Durchlauf
+   startet erst, wenn der vorherige fertig ist (plus kurze Pause) –
+   so kann sich die Schleife nie selbst überholen.
+   ================================================================ */
+const btnLive = document.getElementById("btnLive");
+let liveAn = false;
+
+function liveSchritt() {
+  if (!liveAn) return;
+  // Pausieren, solange die Wert-Auswahl offen ist (Antippen in Ruhe)
+  if (waehler.hidden && kameraAktiv && !fotoModus) {
+    try { analyseDurchfuehren(true); } catch (fehler) { /* Einzelfehler überspringen */ }
+  }
+  setTimeout(liveSchritt, KONFIG.LIVE_PAUSE_MS);
+}
+
+function liveStoppen() {
+  liveAn = false;
+  btnLive.classList.remove("an");
+  btnLive.style.background = ""; btnLive.style.color = "";
+  btnAnalyse.disabled = false;
+}
+
+btnLive.addEventListener("click", () => {
+  if (liveAn) { liveStoppen(); status("Live gestoppt"); return; }
+  if (!kameraAktiv || fotoModus) { status("Live geht nur mit Kamerabild"); return; }
+  liveAn = true;
+  liveRMin = liveRMax = null;
+  btnLive.style.background = "var(--gold)"; btnLive.style.color = "#1A1405";
+  btnAnalyse.disabled = true;   // Einzel-Analyse während Live sperren
+  status("Live gestartet …");
+  liveSchritt();
+});
+
+/* ================================================================
+   HAUPT-ABLAUF: Klick auf "Münzen zählen" (Einzelbild)
    ================================================================ */
 btnAnalyse.addEventListener("click", () => {
   btnAnalyse.disabled = true;
@@ -998,20 +1168,7 @@ btnAnalyse.addEventListener("click", () => {
   // dann die (rechenintensive) Analyse starten
   setTimeout(() => {
     try {
-      const bild = bildEinlesen();
-      if (!bild) { status("Kein Bild verfügbar"); return; }
-
-      const kanten  = kantenFinden(bild);                       // Schritt 3
-      const muenzen = kreiseSuchen(kanten, bild.width, bild.height); // Schritt 4
-      for (const m of muenzen) m.gruppe = farbGruppe(bild, m);  // Schritt 5
-      const mehrdeutig = werteZuordnen(muenzen);                // Schritt 6
-      letzteMuenzen = muenzen;                                  // fürs Antippen merken
-      ergebnisZeichnen(muenzen);                                // Schritt 7
-      summeAnzeigen(muenzen);
-      if (mehrdeutig)
-        status("Größe nicht eindeutig – tippe eine Münze an und wähle ihren Wert");
-      else
-        status(muenzen.length ? "Fertig – zum Korrigieren Münze antippen" : "Nichts gefunden – näher ran oder Licht verbessern");
+      analyseDurchfuehren(false);
     } finally {
       btnAnalyse.disabled = false;
     }
