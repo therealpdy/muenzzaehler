@@ -120,7 +120,7 @@
 
   <header>
     <h1>Münzzähler</h1>
-    <span class="sub">Euro · Kamera-Erkennung</span>
+    <span class="sub">Euro · Kamera-Erkennung · <b style="color:var(--gold)">v3</b></span>
   </header>
 
   <!-- Kamera / Foto-Bereich -->
@@ -260,6 +260,10 @@ let kameraAktiv = false;   // Läuft gerade das Live-Bild?
 let fotoModus   = false;   // Wird gerade ein hochgeladenes Foto angezeigt?
 
 // ---------- 1) Kamera starten ----------
+// Extra-robust für iPhone/Safari: Wir verlassen uns NICHT auf
+// Browser-Ereignisse, sondern prüfen selbst alle 300 ms, ob das
+// Video bereits echte Bilddaten liefert. Nach 8 Sekunden ohne
+// Bild zeigen wir eine klare Fehlermeldung mit Details an.
 async function kameraStarten() {
   try {
     // Rückkamera bevorzugen ("environment"), in guter Auflösung
@@ -268,33 +272,48 @@ async function kameraStarten() {
       audio: false
     });
     video.srcObject = stream;
+    video.muted = true;                          // Sicherheitshalber nochmal per Code
+    video.setAttribute("playsinline", "");       // iPhone: im Fenster statt Vollbild
+    video.play().catch(() => {});                // Abspielen anstoßen, Fehler egal
 
-    // WICHTIG für iPhone/Safari: Nicht auf video.play() warten
-    // (das Signal kommt dort manchmal nie an). Stattdessen den
-    // Hinweis ausblenden, sobald wirklich Bilddaten ankommen.
-    const bildIstDa = () => {
-      kameraAktiv = true;
-      camHinweis.hidden = true;
-      status("Bereit – Münzen ins Bild legen und „Münzen zählen“ tippen");
-    };
-    video.addEventListener("loadedmetadata", bildIstDa, { once: true });
-    video.addEventListener("playing",        bildIstDa, { once: true });
+    // --- Eigene Prüf-Schleife statt Browser-Ereignisse ---
+    let versuche = 0;
+    const pruefer = setInterval(() => {
+      versuche++;
 
-    // Abspielen anstoßen; Fehler hier sind unkritisch,
-    // weil die Ereignisse oben den Rest erledigen
-    video.play().catch(() => {});
+      // Liefert das Video schon Bilddaten? (Breite > 0 = ja)
+      if (video.videoWidth > 0) {
+        clearInterval(pruefer);
+        kameraAktiv = true;
+        camHinweis.hidden = true;
+        status("Bereit – Münzen ins Bild legen und „Münzen zählen“ tippen");
+        return;
+      }
 
-    // Sicherheitsnetz: Falls nach 3 Sekunden schon Bildgröße
-    // bekannt ist, aber kein Ereignis kam → Hinweis trotzdem weg
-    setTimeout(() => {
-      if (!kameraAktiv && video.videoWidth > 0) bildIstDa();
-    }, 3000);
+      // Zwischendurch immer wieder Abspielen anstoßen
+      // (iOS ignoriert den ersten Versuch manchmal)
+      if (versuche % 4 === 0) video.play().catch(() => {});
+
+      // Nach ca. 8 Sekunden (27 × 300 ms) aufgeben und Details zeigen
+      if (versuche > 27) {
+        clearInterval(pruefer);
+        const spur = stream.getVideoTracks()[0];
+        camHinweis.hidden = false;
+        camHinweis.innerHTML =
+          "<div>🎥</div><div>Kamera meldet sich, liefert aber kein Bild.<br>" +
+          "<small style='opacity:.7'>Technik-Info: Spur = " +
+          (spur ? spur.readyState + " / " + (spur.muted ? "stumm" : "aktiv") : "keine") +
+          "</small><br><br>Bitte Seite neu laden oder unten <b>„Foto wählen“</b> nutzen.</div>";
+      }
+    }, 300);
+
   } catch (fehler) {
-    // Kein Zugriff möglich (z. B. Berechtigung verweigert oder im
-    // eingebetteten Fenster gesperrt) → Foto-Auswahl als Ersatzweg.
+    // Kein Zugriff möglich → genauen Grund anzeigen und
+    // die Foto-Auswahl als Ersatzweg anbieten.
     camHinweis.innerHTML =
-      "<div>🚫</div><div>Kein Kamera-Zugriff möglich.<br>Nutze unten <b>„Foto wählen“</b> – " +
-      "auf dem Handy öffnet das direkt deine Kamera.</div>";
+      "<div>🚫</div><div>Kein Kamera-Zugriff möglich.<br>" +
+      "<small style='opacity:.7'>Technik-Info: " + fehler.name + "</small><br><br>" +
+      "Nutze unten <b>„Foto wählen“</b> – auf dem Handy öffnet das direkt deine Kamera.</div>";
   }
 }
 
